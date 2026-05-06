@@ -10,5 +10,6 @@ repository = "https://github.com/SidneyLYZhang/simreader"
 
 [dependencies]
 calamine = { version = "0.34.0", features = ["chrono"] }
-clap = { version = "4.6.1", features = ["derive", "color"] }
-polars = { version = "0.53.0", features = ["csv","json","polars-parquet","lazy","ipc"] }
+clap = { version = "4.6.1", features = ["derive"] }
+polars = { version = "0.53.0", features = ["csv","json","parquet","lazy","ipc"] }
+anyhow = "1.0"
