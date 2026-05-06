@@ -2,7 +2,13 @@
 
 It's a Simple Reader for data files and txt files in Rust.
 
-
+Supported File Formats:
+- CSV
+- JSON
+- Parquet
+- Arrow IPC
+- Excel
+- Text
 
 
 ## Thanks
@@ -12,4 +18,4 @@ It's a Simple Reader for data files and txt files in Rust.
 
 ## License
 
-MIT
+MIT-License
