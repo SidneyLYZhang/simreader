@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+pub use crate::config::ReasoningEffort;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -37,25 +39,6 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReasoningEffort {
-    Low,
-    Medium,
-    High,
-    XHigh,
-    Max,
-}
-
-impl ReasoningEffort {
-    pub fn as_high_or_max(&self) -> &str {
-        match self {
-            ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High => "high",
-            ReasoningEffort::XHigh | ReasoningEffort::Max => "max",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     pub enabled: bool,
@@ -71,6 +54,17 @@ impl Default for ThinkingConfig {
             effort: Some(ReasoningEffort::High),
             max_tokens: None,
             exclude: false,
+        }
+    }
+}
+
+impl From<crate::config::ThinkingSettings> for ThinkingConfig {
+    fn from(s: crate::config::ThinkingSettings) -> Self {
+        Self {
+            enabled: s.enabled,
+            effort: s.effort,
+            max_tokens: s.max_tokens,
+            exclude: s.exclude,
         }
     }
 }

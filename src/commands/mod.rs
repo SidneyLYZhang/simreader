@@ -1,4 +1,3 @@
-pub mod rand;
 pub mod chat;
 pub mod head;
 pub mod tail;

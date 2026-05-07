@@ -34,8 +34,8 @@ impl OpenRouterProvider {
             api_key: api_key.into(),
             base_url: OPENROUTER_API_BASE.to_string(),
             default_model: DEFAULT_MODEL.to_string(),
-            http_referer: None,
-            x_title: None,
+            http_referer: "https://github.com/SidneyLYZhang/simreader".to_string(),
+            x_title: "SimReader".to_string(),
         })
     }
 
