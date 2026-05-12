@@ -43,14 +43,14 @@ fn default_thinking_enabled() -> bool {
 }
 
 fn default_thinking_effort() -> Option<ReasoningEffort> {
-    Some(ReasoningEffort::High)
+    Some(ReasoningEffort::Max)
 }
 
 impl Default for ThinkingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            effort: Some(ReasoningEffort::High),
+            effort: Some(ReasoningEffort::Max),
             max_tokens: None,
             exclude: false,
         }
@@ -74,7 +74,7 @@ fn default_provider() -> String {
 }
 
 fn default_model() -> String {
-    "deepseek-v4-flash".into()
+    "deepseek-v3-flash".into()
 }
 
 fn default_base_url() -> String {
@@ -85,9 +85,34 @@ impl Default for LlmSettings {
     fn default() -> Self {
         Self {
             provider: "deepseek".into(),
-            model: "deepseek-v4-flash".into(),
+            model: "deepseek-v3-flash".into(),
             base_url: "https://api.deepseek.com/".into(),
             thinking: ThinkingSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplaySettings {
+    #[serde(default = "default_line_width")]
+    pub line_width: usize,
+    #[serde(default = "default_output_language")]
+    pub output_language: String,
+}
+
+fn default_line_width() -> usize {
+    80
+}
+
+fn default_output_language() -> String {
+    "中文".into()
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            line_width: 80,
+            output_language: "中文".into(),
         }
     }
 }
@@ -96,12 +121,15 @@ impl Default for LlmSettings {
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmSettings,
+    #[serde(default)]
+    pub display: DisplaySettings,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             llm: LlmSettings::default(),
+            display: DisplaySettings::default(),
         }
     }
 }
@@ -263,6 +291,24 @@ impl ConfigManager {
     pub fn delete_api_key_for_current_provider(&self) -> anyhow::Result<()> {
         self.delete_api_key(&self.config.llm.provider)
     }
+
+    pub fn line_width(&self) -> usize {
+        self.config.display.line_width
+    }
+
+    pub fn set_line_width(&mut self, width: usize) -> &mut Self {
+        self.config.display.line_width = width;
+        self
+    }
+
+    pub fn output_language(&self) -> &str {
+        &self.config.display.output_language
+    }
+
+    pub fn set_output_language(&mut self, lang: impl Into<String>) -> &mut Self {
+        self.config.display.output_language = lang.into();
+        self
+    }
 }
 
 #[cfg(test)]
@@ -273,10 +319,10 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.llm.provider, "deepseek");
-        assert_eq!(config.llm.model, "deepseek-v4-flash");
+        assert_eq!(config.llm.model, "deepseek-v3-flash");
         assert_eq!(config.llm.base_url, "https://api.deepseek.com/");
         assert!(config.llm.thinking.enabled);
-        assert_eq!(config.llm.thinking.effort, Some(ReasoningEffort::High));
+        assert_eq!(config.llm.thinking.effort, Some(ReasoningEffort::Max));
     }
 
     #[test]
@@ -357,7 +403,7 @@ exclude = false
     fn test_thinking_settings_default() {
         let settings = ThinkingSettings::default();
         assert!(settings.enabled);
-        assert_eq!(settings.effort, Some(ReasoningEffort::High));
+        assert_eq!(settings.effort, Some(ReasoningEffort::Max));
         assert_eq!(settings.max_tokens, None);
         assert!(!settings.exclude);
     }

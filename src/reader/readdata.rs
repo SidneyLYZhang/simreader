@@ -74,31 +74,30 @@ fn read_with_engine(
     let path = Path::new(file_path);
     match format {
         FileFormat::Csv => {
-            // ---------- Lazy CSV（支持自定义分隔符） ----------
             let sep = csv_separator.unwrap_or(b',');
-            let lf = LazyCsvReader::new(path)
+            let lf = LazyCsvReader::new(PlRefPath::from(file_path))
                 .with_separator(sep)
-                .has_header(true)
+                .with_has_header(true)
                 .finish()?;
             Ok(ReaderEngine::PolarsLazy(lf))
         }
 
         FileFormat::Json => {
-            // ---------- Lazy NDJSON ----------
-            // scan_ndjson 直接返回 LazyFrame
-            let lf = LazyFrame::scan_ndjson(path, ScanArgsNdJson::default())?;
+            let lf = LazyJsonLineReader::new(PlRefPath::from(file_path)).finish()?;
             Ok(ReaderEngine::PolarsLazy(lf))
         }
 
         FileFormat::Ipc => {
-            // ---------- Lazy Arrow IPC ----------
-            let lf = LazyFrame::scan_ipc(path, ScanArgsIpc::default())?;
+            let lf = LazyFrame::scan_ipc(
+                PlRefPath::from(file_path),
+                Default::default(),
+                Default::default(),
+            )?;
             Ok(ReaderEngine::PolarsLazy(lf))
         }
 
         FileFormat::Parquet => {
-            // ---------- Lazy Parquet ----------
-            let lf = LazyFrame::scan_parquet(path, ScanArgsParquet::default())?;
+            let lf = LazyFrame::scan_parquet(PlRefPath::from(file_path), ScanArgsParquet::default())?;
             Ok(ReaderEngine::PolarsLazy(lf))
         }
 
@@ -128,7 +127,7 @@ fn read_excel_to_df(
 ) -> PolarsResult<DataFrame> {
     // 1. 打开工作簿
     let mut workbook: Xlsx<_> =
-        open_workbook(path).map_err(|e| PolarsError::ComputeError(e.to_string().into()))?;
+        open_workbook(path).map_err(|e: calamine::XlsxError| PolarsError::ComputeError(e.to_string().into()))?;
 
     // 2. 确定要读取的工作表名
     let sheet = sheet_name.unwrap_or_else(|| {
@@ -143,10 +142,11 @@ fn read_excel_to_df(
     workbook
         .load_merged_regions()
         .map_err(|e| PolarsError::ComputeError(e.to_string().into()))?;
-    let merged = workbook
+    let merged: Vec<(String, String, calamine::Dimensions)> = workbook
         .merged_regions_by_sheet(&sheet)
-        .cloned()
-        .unwrap_or_default();
+        .into_iter()
+        .map(|(a, b, c)| (a.clone(), b.clone(), c.clone()))
+        .collect();
 
     // 4. 读取整个工作表的单元格范围
     let range: Range<Data> = workbook
@@ -162,25 +162,18 @@ fn read_excel_to_df(
 
 /// 将 calamine 的 `Range<Data>` 转换为 Polars 的 `DataFrame`
 fn calamine_range_to_polars_df(range: &Range<Data>) -> PolarsResult<DataFrame> {
-    // 情况：工作表为空
-    if range.rows().len() == 0 {
-        return DataFrame::empty().into();
+    let all_rows: Vec<&[Data]> = range.rows().collect::<Vec<_>>();
+    if all_rows.is_empty() {
+        return Ok(DataFrame::empty());
     }
 
-    // ---------- 提取表头 ----------
-    let header_row = range.rows().next().unwrap();
-    let mut col_names: Vec<String> = Vec::new();
-    // 统计实际有效列数
-    let max_cols = range
-        .rows()
-        .map(|row| row.len())
-        .max()
-        .unwrap_or(0);
+    let header_row = all_rows[0];
+    let max_cols = all_rows.iter().map(|row| row.len()).max().unwrap_or(0);
 
+    let mut col_names: Vec<String> = Vec::new();
     for col_idx in 0..max_cols {
         let cell_value = header_row.get(col_idx).unwrap_or(&Data::Empty);
         let name = cell_value_to_string(cell_value);
-        // 空表头自动补名
         let name = if name.is_empty() {
             format!("column_{}", col_idx + 1)
         } else {
@@ -189,22 +182,102 @@ fn calamine_range_to_polars_df(range: &Range<Data>) -> PolarsResult<DataFrame> {
         col_names.push(name);
     }
 
-    // ---------- 构建列向量 ----------
-    let mut columns: Vec<Series> = Vec::new();
+    let data_rows = all_rows.len().saturating_sub(1);
+    let mut columns: Vec<polars::prelude::Column> = Vec::new();
     for col_idx in 0..max_cols {
-        let name = &col_names[col_idx];
-        let mut col_data: Vec<String> = Vec::new();
+        let name = PlSmallStr::from_str(&col_names[col_idx]);
 
-        // 遍历数据行（跳过表头）
-        for row in range.rows().skip(1) {
-            let cell = row.get(col_idx).unwrap_or(&Data::Empty);
-            col_data.push(cell_value_to_string(cell));
-        }
+        let col_cells: Vec<&Data> = all_rows.iter().skip(1)
+            .map(|row| row.get(col_idx).unwrap_or(&Data::Empty))
+            .collect();
 
-        columns.push(Series::new(name, &col_data));
+        let series = build_typed_series(&name, &col_cells);
+        columns.push(polars::prelude::Column::from(series));
     }
 
-    DataFrame::new(columns)
+    DataFrame::new(data_rows, columns)
+}
+
+fn build_typed_series(name: &PlSmallStr, cells: &[&Data]) -> Series {
+    let non_empty: Vec<&&Data> = cells.iter().filter(|d| !matches!(d, Data::Empty)).collect();
+
+    if non_empty.is_empty() {
+        let empty_strs: Vec<&str> = vec![""; cells.len()];
+        return Series::new(name.clone(), &empty_strs);
+    }
+
+    let all_bool = non_empty.iter().all(|d| matches!(d, Data::Bool(_)));
+    let all_int = non_empty.iter().all(|d| matches!(d, Data::Int(_)));
+    let all_float = non_empty.iter().all(|d| matches!(d, Data::Float(_)));
+    let all_numeric = non_empty.iter().all(|d| matches!(d, Data::Int(_) | Data::Float(_)));
+    let all_datetime = non_empty.iter().all(|d| matches!(d, Data::DateTime(_)));
+
+    if all_bool {
+        let values: Vec<Option<bool>> = cells.iter().map(|d| {
+            match d {
+                Data::Bool(b) => Some(*b),
+                _ => None,
+            }
+        }).collect();
+        return Series::new(name.clone(), &values);
+    }
+
+    if all_int {
+        let values: Vec<Option<i64>> = cells.iter().map(|d| {
+            match d {
+                Data::Int(i) => Some(*i),
+                _ => None,
+            }
+        }).collect();
+        return Series::new(name.clone(), &values);
+    }
+
+    if all_float || all_numeric {
+        let values: Vec<Option<f64>> = cells.iter().map(|d| {
+            match d {
+                Data::Float(f) => Some(*f),
+                Data::Int(i) => Some(*i as f64),
+                _ => None,
+            }
+        }).collect();
+        return Series::new(name.clone(), &values);
+    }
+
+    if all_datetime {
+        let values: Vec<String> = cells.iter().map(|d| {
+            match d {
+                Data::DateTime(dt) => format!("{}", dt),
+                _ => String::new(),
+            }
+        }).collect();
+        return Series::new(name.clone(), &values);
+    }
+
+    let all_string = non_empty.iter().all(|d| matches!(d, Data::String(_)));
+    if all_string {
+        let all_percent = non_empty.iter().all(|d| {
+            if let Data::String(s) = d {
+                s.ends_with('%')
+            } else {
+                false
+            }
+        });
+        if all_percent {
+            let values: Vec<Option<f64>> = cells.iter().map(|d| {
+                match d {
+                    Data::String(s) if s.ends_with('%') => {
+                        let num_str = &s[..s.len() - 1];
+                        num_str.trim().parse::<f64>().ok().map(|n| n / 100.0)
+                    }
+                    _ => None,
+                }
+            }).collect();
+            return Series::new(name.clone(), &values);
+        }
+    }
+
+    let values: Vec<String> = cells.iter().map(|d| cell_value_to_string(d)).collect();
+    Series::new(name.clone(), &values)
 }
 
 /// 将 calamine 的 `Data` 变量转换为 Rust `String`
@@ -216,7 +289,7 @@ fn cell_value_to_string(data: &Data) -> String {
         Data::Float(f) => f.to_string(),
         Data::String(s) => s.clone(),
         Data::DateTime(dt) => format!("{}", dt),
-        Data::DurationIso(_) | Data::Duration(_) | Data::Error(_) => String::new(),
+        Data::Error(_) => String::new(),
         _ => String::new(),
     }
 }
@@ -231,32 +304,34 @@ fn cell_value_to_string(data: &Data) -> String {
 /// 本函数以左上角值为准，将该值复制到区域内的每一个单元格，
 /// 使其成为规整的矩形表格。
 fn fill_merged_cells(
-    mut range: Range<Data>,
+    range: Range<Data>,
     merged_regions: &[(String, String, calamine::Dimensions)],
 ) -> Range<Data> {
+    let mut data: Vec<Vec<Data>> = range
+        .rows()
+        .map(|row| row.to_vec())
+        .collect();
+
     for (_sheet_name, _path, dim) in merged_regions {
         let start_row = dim.start.0 as usize;
         let start_col = dim.start.1 as usize;
         let end_row = dim.end.0 as usize;
         let end_col = dim.end.1 as usize;
 
-        // 安全获取左上角值
         let top_left_value = {
             let row_idx = start_row.saturating_sub(1);
             let col_idx = start_col.saturating_sub(1);
-            if let Some(row) = range.row(row_idx) {
-                row.get(col_idx).cloned().unwrap_or(Data::Empty)
-            } else {
-                Data::Empty
-            }
+            data.get(row_idx)
+                .and_then(|row| row.get(col_idx))
+                .cloned()
+                .unwrap_or(Data::Empty)
         };
 
-        // 将左上角值复制到合并区域内的所有单元格
         for r in start_row..=end_row {
             let row_idx = r.saturating_sub(1);
             for c in start_col..=end_col {
                 let col_idx = c.saturating_sub(1);
-                if let Some(row) = range.row_mut(row_idx) {
+                if let Some(row) = data.get_mut(row_idx) {
                     if let Some(cell) = row.get_mut(col_idx) {
                         if *cell == Data::Empty {
                             *cell = top_left_value.clone();
@@ -266,5 +341,15 @@ fn fill_merged_cells(
             }
         }
     }
-    range
+
+    let cells: Vec<calamine::Cell<Data>> = data
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, row)| {
+            row.into_iter().enumerate().map(move |(j, d)| {
+                calamine::Cell::new((i as u32, j as u32), d)
+            })
+        })
+        .collect();
+    Range::from_sparse(cells)
 }

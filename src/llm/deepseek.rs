@@ -1,12 +1,11 @@
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde_json::Value;
 
 use super::{
-    ApiChatMessage, ChatMessage, ChatRequest, ChatResponse, ChatStream, LlmProvider, StreamChunk,
+    ApiChatMessage, ChatRequest, ChatResponse, ChatStream, LlmProvider, StreamChunk,
     ThinkingConfig, Usage,
 };
 
@@ -35,12 +34,12 @@ impl DeepSeekProvider {
         })
     }
 
-    pub fn with_timeout(mut self, timeout_secs: u64) -> anyhow::Result<Self> {
-        self.client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()?;
-        Ok(self)
-    }
+    // pub fn with_timeout(mut self, timeout_secs: u64) -> anyhow::Result<Self> {
+    //     self.client = reqwest::Client::builder()
+    //         .timeout(Duration::from_secs(timeout_secs))
+    //         .build()?;
+    //     Ok(self)
+    // }
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = model.into();
@@ -127,7 +126,7 @@ impl DeepSeekProvider {
         })
     }
 
-    fn process_sse_line(&self, line: &str) -> Option<StreamChunk> {
+    fn process_sse_line(line: &str) -> Option<StreamChunk> {
         let data = line.strip_prefix("data: ")?;
 
         if data == "[DONE]" {
@@ -227,39 +226,31 @@ impl LlmProvider for DeepSeekProvider {
         }
 
         let byte_stream = response.bytes_stream();
-        let stream = byte_stream.filter_map(move |chunk_result| {
+        let stream = byte_stream.flat_map(move |chunk_result| {
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    return futures::future::ready(Some(Err(anyhow::anyhow!(
-                        "流读取错误: {}",
-                        e
-                    ))));
+                    let err_item: Vec<super::StreamResult> =
+                        vec![Err(anyhow::anyhow!("流读取错误: {}", e))];
+                    return futures::stream::iter(err_item);
                 }
             };
 
             let text = String::from_utf8_lossy(&chunk).to_string();
-            let mut results: Vec<StreamChunk> = Vec::new();
+            let mut results: Vec<super::StreamResult> = Vec::new();
 
             for line in text.lines() {
                 let line = line.trim().to_string();
                 if line.is_empty() {
                     continue;
                 }
-                if let Some(chunk_data) = self.process_sse_line(&line) {
-                    results.push(chunk_data);
+                if let Some(chunk_data) = Self::process_sse_line(&line) {
+                    results.push(Ok(chunk_data));
                 }
             }
 
-            if results.is_empty() {
-                futures::future::ready(None)
-            } else {
-                let stream_items: Vec<super::StreamResult> =
-                    results.into_iter().map(Ok).collect();
-                futures::future::ready(Some(futures::stream::iter(stream_items)))
-            }
-        })
-        .flatten();
+            futures::stream::iter(results)
+        });
 
         Ok(Box::pin(stream))
     }
