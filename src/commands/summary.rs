@@ -279,20 +279,27 @@ async fn summarize_paragraph(
         model: mgr.config().llm.model.clone(),
         messages: vec![
             crate::llm::ChatMessage::system(&format!(
-                "请用不超过30个词/字（不含标点）总结以下段落的大意。请用{}输出。",
+                "\
+请用不超过30个词/字（不含标点）总结以下段落的大意。
+仅输出最终总结，不要包含任何思考过程、自我反思、元评论或格式说明。
+请用{}输出。",
                 lang
             )),
             crate::llm::ChatMessage::user(text),
         ],
         temperature: Some(0.3),
-        max_tokens: Some(200),
+        max_tokens: Some(500),
         top_p: None,
-        thinking: Some(crate::llm::ThinkingConfig::from(mgr.config().llm.thinking.clone())),
+        thinking: None,
         files: vec![],
     };
 
     let response = provider.chat(request).await?;
-    Ok(response.content.trim().to_string())
+    let summary = response.content.trim().to_string();
+    if summary.is_empty() {
+        anyhow::bail!("LLM 返回了空内容");
+    }
+    Ok(summary)
 }
 
 async fn summarize_overall(
@@ -306,18 +313,27 @@ async fn summarize_overall(
         model: mgr.config().llm.model.clone(),
         messages: vec![
             crate::llm::ChatMessage::system(&format!(
-                "请用不超过45个词/字（不含标点）对以下文字进行概述。请用{}输出。",
+                "\
+请对以下文字进行全面概述。要求：
+1. 长度至少 100 个英文单词或 300 个中文字符（不含标点）。
+2. 表达简洁精炼，避免冗余，突出重点信息。
+3. 仅输出最终概述正文，不要包含任何思考过程、自我反思、元评论或格式说明。
+4. 请用{}输出。",
                 lang
             )),
             crate::llm::ChatMessage::user(text),
         ],
         temperature: Some(0.3),
-        max_tokens: Some(300),
+        max_tokens: Some(1500),
         top_p: None,
-        thinking: Some(crate::llm::ThinkingConfig::from(mgr.config().llm.thinking.clone())),
+        thinking: None,
         files: vec![],
     };
 
     let response = provider.chat(request).await?;
-    Ok(response.content.trim().to_string())
+    let summary = response.content.trim().to_string();
+    if summary.is_empty() {
+        anyhow::bail!("LLM 返回了空内容");
+    }
+    Ok(summary)
 }

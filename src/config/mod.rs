@@ -85,7 +85,7 @@ impl Default for LlmSettings {
     fn default() -> Self {
         Self {
             provider: "deepseek".into(),
-            model: "deepseek-v3-flash".into(),
+            model: "deepseek-v4-flash".into(),
             base_url: "https://api.deepseek.com/".into(),
             thinking: ThinkingSettings::default(),
         }

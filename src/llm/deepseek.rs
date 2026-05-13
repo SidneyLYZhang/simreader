@@ -73,8 +73,7 @@ impl DeepSeekProvider {
         if let Some(ref thinking) = request.thinking {
             self.apply_thinking_config(&mut body, thinking);
         } else {
-            body["thinking"] = serde_json::json!({"type": "enabled"});
-            body["reasoning_effort"] = serde_json::json!("high");
+            body["thinking"] = serde_json::json!({"type": "disabled"});
         }
 
         body
@@ -102,10 +101,16 @@ impl DeepSeekProvider {
     async fn parse_non_stream_response(&self, response: reqwest::Response) -> anyhow::Result<ChatResponse> {
         let json: Value = response.json().await?;
 
-        let content = json["choices"][0]["message"]["content"]
+        let message = &json["choices"][0]["message"];
+
+        let content = message["content"]
             .as_str()
             .unwrap_or("")
             .to_string();
+
+        if content.is_empty() {
+            anyhow::bail!("DeepSeek API 返回了空内容");
+        }
 
         let model = json["model"].as_str().unwrap_or("unknown").to_string();
 

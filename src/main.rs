@@ -1,9 +1,13 @@
+#![allow(dead_code)]
+
 mod commands;
 mod config;
 mod llm;
 mod reader;
 
 use clap::{arg, Arg, ArgAction, Command};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
     let matches = Command::new("simreader")
@@ -293,6 +297,12 @@ fn main() {
                 .value_name("COLS")
                 .help("选择列 (列名, 列号范围如0:5, 或列号列表如2,4,7)"),
         )
+        .arg(
+            Arg::new("version_flag")
+                .long("version")
+                .action(ArgAction::SetTrue)
+                .help("显示版本信息"),
+        )
         .get_matches();
 
     if let Some(sub_matches) = matches.subcommand_matches("config") {
@@ -502,6 +512,12 @@ fn main() {
         return;
     }
 
+    let version_flag = matches.get_flag("version_flag");
+    if version_flag {
+        println!("SimReader {}", VERSION);
+        std::process::exit(0);
+    }
+
     let file = matches.get_one::<String>("file");
     if file.is_none() {
         eprintln!("错误: 请指定文件路径或子命令。使用 --help 查看帮助。");
@@ -526,7 +542,7 @@ fn main() {
     }
 
     if flags_set > 1 {
-        eprintln!("错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q 是互斥的");
+        eprintln!("错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q, --version是互斥的");
         std::process::exit(1);
     }
 
