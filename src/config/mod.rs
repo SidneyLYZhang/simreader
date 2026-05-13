@@ -74,7 +74,7 @@ fn default_provider() -> String {
 }
 
 fn default_model() -> String {
-    "deepseek-v3-flash".into()
+    "deepseek-v4-flash".into()
 }
 
 fn default_base_url() -> String {
@@ -319,7 +319,7 @@ mod tests {
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.llm.provider, "deepseek");
-        assert_eq!(config.llm.model, "deepseek-v3-flash");
+        assert_eq!(config.llm.model, "deepseek-v4-flash");
         assert_eq!(config.llm.base_url, "https://api.deepseek.com/");
         assert!(config.llm.thinking.enabled);
         assert_eq!(config.llm.thinking.effort, Some(ReasoningEffort::Max));
