@@ -254,11 +254,13 @@ impl ConfigManager {
         self
     }
 
+    #[cfg(not(all(target_os = "linux", target_env = "musl")))]
     fn keyring_entry(provider: &str) -> anyhow::Result<keyring::Entry> {
         keyring::Entry::new(APP_NAME, &format!("{}-{}", KEYRING_USER_PREFIX, provider))
             .context("无法创建密钥环条目")
     }
 
+    #[cfg(not(all(target_os = "linux", target_env = "musl")))]
     pub fn set_api_key(&self, provider: &str, api_key: &str) -> anyhow::Result<()> {
         let entry = Self::keyring_entry(provider)?;
         entry
@@ -266,6 +268,7 @@ impl ConfigManager {
             .with_context(|| format!("无法保存 {} 的 API Key 到系统密钥环", provider))
     }
 
+    #[cfg(not(all(target_os = "linux", target_env = "musl")))]
     pub fn get_api_key(&self, provider: &str) -> anyhow::Result<String> {
         let entry = Self::keyring_entry(provider)?;
         entry
@@ -273,11 +276,27 @@ impl ConfigManager {
             .with_context(|| format!("未找到 {} 的 API Key，请先通过 'simreader config set-key' 配置", provider))
     }
 
+    #[cfg(not(all(target_os = "linux", target_env = "musl")))]
     pub fn delete_api_key(&self, provider: &str) -> anyhow::Result<()> {
         let entry = Self::keyring_entry(provider)?;
         entry
             .delete_credential()
             .with_context(|| format!("无法删除 {} 的 API Key", provider))
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    pub fn set_api_key(&self, provider: &str, _api_key: &str) -> anyhow::Result<()> {
+        anyhow::bail!("musl 构建不支持系统密钥环，无法保存 {} 的 API Key", provider)
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    pub fn get_api_key(&self, provider: &str) -> anyhow::Result<String> {
+        anyhow::bail!("musl 构建不支持系统密钥环，无法获取 {} 的 API Key", provider)
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    pub fn delete_api_key(&self, provider: &str) -> anyhow::Result<()> {
+        anyhow::bail!("musl 构建不支持系统密钥环，无法删除 {} 的 API Key", provider)
     }
 
     pub fn set_api_key_for_current_provider(&self, api_key: &str) -> anyhow::Result<()> {

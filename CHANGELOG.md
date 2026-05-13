@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-05-13
+
+### Fixed
+
+- 修复 Linux musl 目标编译失败：`keyring` 依赖 `libdbus-sys` 在 musl 环境下不可用 #?
+- `Cargo.toml` 中将 Linux `keyring` 的编译条件由 `target_os = "linux"` 改为排除 `target_env = "musl"`
+- `src/config/mod.rs` 中为 musl 目标添加条件编译回退，keyring 相关方法返回明确的错误提示
+- CI 工作流增加 Linux 系统依赖安装步骤（`libdbus-1-dev`、`pkg-config`），修复 `x86_64-unknown-linux-gnu` 构建
+- Release 工作流增加 musl 工具链安装（`musl-tools`）
+
 ## [0.3.1] - 2026-05-13
 
 ### Added
@@ -42,4 +52,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **brotli**、**simd-json**：数据压缩与高性能 JSON 解析（通过 polars 间接引入）
 - **dbus-secret-service**：Linux 密钥环后端（通过 keyring 间接引入）
 
+[0.3.2]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.2
 [0.3.1]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.1
