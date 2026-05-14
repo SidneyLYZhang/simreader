@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-05-14
+
+### Added
+
+- `rows` 命令：按行号查看文件指定行数据，支持文本文件与数据文件的精确行选取
+- `--rows` / `-r <ROW>` 参数：支持指定行号列表（如 `2,9,101`）或行号范围（如 `3:7`）查看指定行
+- `--txt` 参数：配合 `--rows` 使用，强制以纯文本模式输出，忽略配置的行宽限制
+- 数据文件 `rows` 输出自动附加行索引列（Row），便于定位原始数据位置
+- 数据文件 `rows` 输出支持列宽自动截断（超长内容以 `...` 省略），提升可读性
+
 ## [0.3.2] - 2026-05-13
 
 ### Fixed
@@ -52,5 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **brotli**、**simd-json**：数据压缩与高性能 JSON 解析（通过 polars 间接引入）
 - **dbus-secret-service**：Linux 密钥环后端（通过 keyring 间接引入）
 
+[0.3.5]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.5
 [0.3.2]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.2
 [0.3.1]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.1

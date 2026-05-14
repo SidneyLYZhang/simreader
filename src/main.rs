@@ -260,6 +260,20 @@ fn main() {
                 .help("利用 LLM 对文件内容进行问答"),
         )
         .arg(
+            Arg::new("rows_flag")
+                .short('r')
+                .long("rows")
+                .value_name("ROW")
+                .num_args(1)
+                .help("显示指定行的数据或信息（如 2,9,101 或 3:7）"),
+        )
+        .arg(
+            Arg::new("txt_flag")
+                .long("txt")
+                .action(ArgAction::SetTrue)
+                .help("强制以纯文本模式输出，忽略行宽限制（需配合 --rows 使用）"),
+        )
+        .arg(
             Arg::new("num")
                 .short('n')
                 .long("num")
@@ -511,9 +525,15 @@ fn main() {
         }
         return;
     }
+    let rows_val = matches.get_one::<String>("rows_flag");
+    let txt_flag = matches.get_flag("txt_flag");
 
     let version_flag = matches.get_flag("version_flag");
     if version_flag {
+        if rows_val.is_some() {
+            eprintln!("错误: --version 和 --rows 是互斥的");
+            std::process::exit(1);
+        }
         println!("SimReader {}", VERSION);
         std::process::exit(0);
     }
@@ -531,18 +551,18 @@ fn main() {
     let schema_flag = matches.get_flag("schema_flag");
     let quest_val = matches.get_one::<String>("quest_flag");
 
-    let flags_set = [summary_flag, head_flag, tail_flag, schema_flag, quest_val.is_some()]
+    let flags_set = [summary_flag, head_flag, tail_flag, schema_flag, quest_val.is_some(), rows_val.is_some()]
         .iter()
         .filter(|&&x| x)
         .count();
 
     if flags_set == 0 {
-        eprintln!("错误: 必须指定功能选项之一: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q <question>");
+        eprintln!("错误: 必须指定功能选项之一: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q <question>, --rows/-r <ROW>");
         std::process::exit(1);
     }
 
     if flags_set > 1 {
-        eprintln!("错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q, --version是互斥的");
+        eprintln!("错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q, --rows/-r, --version 是互斥的");
         std::process::exit(1);
     }
 
@@ -550,6 +570,38 @@ fn main() {
     let force_csv = matches.get_flag("csv");
     let separator = extract_separator(&matches);
     let col_selection = matches.get_one::<String>("col").map(|s| s.as_str());
+
+    if let Some(row_spec) = rows_val {
+        let selection = match commands::rows::parse_rows(row_spec) {
+            Ok(sel) => sel,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let mgr = match config::ConfigManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("错误: 无法读取配置: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let line_width = if txt_flag { 0 } else { mgr.line_width() };
+
+        if txt_flag || (!force_csv && commands::util::is_text_file(file)) {
+            if let Err(e) = commands::rows::rows_text_file(file, &selection, line_width, txt_flag) {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        } else {
+            if let Err(e) = commands::rows::rows_data_file(file, &selection, no_name, line_width, force_csv, separator, col_selection) {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if summary_flag {
         if force_csv || commands::util::is_data_file(file) {
