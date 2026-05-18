@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-18
+
+### Added
+
+- `input` 统一输入抽象模块，提供 `InputSource`（Stdin / File / Bytes）、`DataFormat`（Text / Csv / Json / Ipc / Parquet / Excel）、`InputConfig` 等类型，封装输入来源与格式自动判定
+- `InputConfig::from_cli()` 方法，从 CLI 参数自动构建输入配置，根据文件扩展名检测数据格式
+- `TextReader` 惰性行迭代器与 `CsvReader` 惰性 CSV 记录迭代器，支持 stdin 流式读取
+- 所有子命令全面支持管道输入与标准输入（stdin），无文件参数时自动从 stdin 读取
+
+### Changed
+
+- **重构**：`head`、`tail`、`rows`、`schema`、`summary`、`chat` 命令全部改用 `InputConfig` 统一输入接口，消除原有 `force_csv` / `is_data_file` 分支逻辑
+- **重构**：`main.rs` CLI 分发逻辑简化，所有短格式模式统一通过 `InputConfig::from_cli()` 构建输入配置
+- `chat` 命令函数签名由 `chat_file(file_path)` 改为 `chat_command(input: &InputConfig)`
+- `commands/util.rs` 新增 `input_to_file_format()` 辅助函数，桥接 `input::DataFormat` 与 `reader::FileFormat`
+- `schema` 与 `summary` 命令输出格式化优化，数值列与字符串列排版更清晰
+- 版本号由 `0.3.5` 升级至 `0.4.0`
+
+### Dependencies
+
+- **csv** (`1`)：CSV 格式原生读取支持
+
 ## [0.3.5] - 2026-05-14
 
 ### Added
@@ -62,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **brotli**、**simd-json**：数据压缩与高性能 JSON 解析（通过 polars 间接引入）
 - **dbus-secret-service**：Linux 密钥环后端（通过 keyring 间接引入）
 
+[0.4.0]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.4.0
 [0.3.5]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.5
 [0.3.2]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.2
 [0.3.1]: https://github.com/SidneyLYZhang/simreader/releases/tag/v0.3.1
