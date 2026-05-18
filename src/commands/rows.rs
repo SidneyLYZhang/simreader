@@ -1,7 +1,5 @@
-use std::path::Path;
-
 use crate::commands::util;
-use crate::reader::readdata::FileFormat;
+use crate::input::{DataFormat, InputConfig};
 
 #[derive(Debug, Clone)]
 pub enum RowSelection {
@@ -37,7 +35,8 @@ pub fn parse_rows(input: &str) -> anyhow::Result<RowSelection> {
             .split(',')
             .map(|s| s.trim().parse::<usize>())
             .collect();
-        let nums = nums.map_err(|_| anyhow::anyhow!("无效的行号列表: {}，行号必须为非负整数", input))?;
+        let nums =
+            nums.map_err(|_| anyhow::anyhow!("无效的行号列表: {}，行号必须为非负整数", input))?;
         if nums.is_empty() {
             anyhow::bail!("行号列表不能为空");
         }
@@ -45,21 +44,39 @@ pub fn parse_rows(input: &str) -> anyhow::Result<RowSelection> {
     }
 }
 
-pub fn rows_text_file(
-    file_path: &str,
+/// 统一入口
+pub fn rows_command(
+    input: &InputConfig,
+    selection: &RowSelection,
+    no_name: bool,
+    line_width: usize,
+    txt_mode: bool,
+    col_selection: Option<&str>,
+) -> anyhow::Result<()> {
+    match input.format() {
+        DataFormat::Text => rows_text(input, selection, line_width, txt_mode),
+        DataFormat::Csv { .. } if input.file_path().is_some() => {
+            rows_data_file(input, selection, no_name, line_width, col_selection)
+        }
+        DataFormat::Csv { .. } => {
+            rows_csv_stream(input, selection, no_name, line_width, col_selection)
+        }
+        _ => rows_data_file(input, selection, no_name, line_width, col_selection),
+    }
+}
+
+fn rows_text(
+    input: &InputConfig,
     selection: &RowSelection,
     line_width: usize,
     txt_mode: bool,
 ) -> anyhow::Result<()> {
-    let path = Path::new(file_path);
-    if !path.exists() {
-        anyhow::bail!("文件不存在: {}", file_path);
-    }
-    let mut reader = crate::reader::readtext::FileReader::new(path)?;
-    let total = reader.total_lines();
+    let reader = input.text_reader()?;
+    let all_lines: Vec<String> = reader.collect::<std::io::Result<Vec<_>>>()?;
+    let total = all_lines.len();
 
     if total == 0 {
-        println!("(文件为空)");
+        println!("(输入为空)");
         return Ok(());
     }
 
@@ -67,17 +84,20 @@ pub fn rows_text_file(
         RowSelection::Specific(nums) => {
             for &line_num in nums {
                 if line_num >= total {
-                    eprintln!("警告: 行号 {} 超出文件范围（总行数: {}，最大有效行号: {}）", line_num, total, total.saturating_sub(1));
+                    eprintln!(
+                        "警告: 行号 {} 超出范围（总行数: {}，最大有效行号: {}）",
+                        line_num,
+                        total,
+                        total.saturating_sub(1)
+                    );
                     continue;
                 }
-                let lines = reader.read_segment(line_num, 1)?;
-                if let Some(line) = lines.first() {
-                    if txt_mode || line_width == 0 {
-                        println!("{}", line);
-                    } else {
-                        let wrapped = util::wrap_line_en(line, line_width);
-                        println!("{}", wrapped);
-                    }
+                let line = &all_lines[line_num];
+                if txt_mode || line_width == 0 {
+                    println!("{}", line);
+                } else {
+                    let wrapped = util::wrap_line_en(line, line_width);
+                    println!("{}", wrapped);
                 }
             }
         }
@@ -85,14 +105,17 @@ pub fn rows_text_file(
             let start = *start;
             let end = (*end).min(total.saturating_sub(1));
             if start > end {
-                anyhow::bail!("起始行号 {} 超出文件范围（总行数: {}）", start, total);
+                anyhow::bail!("起始行号 {} 超出范围（总行数: {}）", start, total);
             }
             if start >= total {
-                anyhow::bail!("起始行号 {} 超出文件范围（总行数: {}，最大有效行号: {}）", start, total, total.saturating_sub(1));
+                anyhow::bail!(
+                    "起始行号 {} 超出范围（总行数: {}，最大有效行号: {}）",
+                    start,
+                    total,
+                    total.saturating_sub(1)
+                );
             }
-            let count = end - start + 1;
-            let lines = reader.read_segment(start, count)?;
-            for line in &lines {
+            for line in &all_lines[start..=end] {
                 if txt_mode || line_width == 0 {
                     println!("{}", line);
                 } else {
@@ -106,28 +129,22 @@ pub fn rows_text_file(
     Ok(())
 }
 
-pub fn rows_data_file(
-    file_path: &str,
+fn rows_data_file(
+    input: &InputConfig,
     selection: &RowSelection,
     no_name: bool,
     _line_width: usize,
-    force_csv: bool,
-    csv_separator: Option<u8>,
     col_selection: Option<&str>,
 ) -> anyhow::Result<()> {
-    let format = if force_csv {
-        FileFormat::Csv
-    } else {
-        util::detect_file_format(file_path)
-            .ok_or_else(|| anyhow::anyhow!("不支持的文件格式: {}", file_path))?
-    };
-    let sep = if force_csv {
-        Some(csv_separator.unwrap_or(b','))
-    } else {
-        util::csv_separator_for_file(file_path)
-    };
+    let file_path = input.file_path().unwrap();
+    let (format, sep) = util::input_to_file_format(input);
 
-    let lf = crate::reader::readdata::read_to_lazyframe(file_path, format, sep, None)?;
+    let lf = crate::reader::readdata::read_to_lazyframe(
+        file_path.to_str().unwrap(),
+        format,
+        sep,
+        None,
+    )?;
     let df_raw = lf.collect()?;
 
     let df_raw = if let Some(col_str) = col_selection {
@@ -216,6 +233,119 @@ pub fn rows_data_file(
 
                 let mut display: Vec<String> = vec![actual_row.to_string()];
                 display.extend(cells.iter().enumerate().map(|(i, c)| {
+                    let char_count = c.chars().count();
+                    if char_count > col_widths[i + 1] {
+                        let truncated: String =
+                            c.chars().take(col_widths[i + 1].saturating_sub(3)).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        c.clone()
+                    }
+                }));
+                println!("{}", display.join("\t"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn rows_csv_stream(
+    input: &InputConfig,
+    selection: &RowSelection,
+    no_name: bool,
+    _line_width: usize,
+    _col_selection: Option<&str>,
+) -> anyhow::Result<()> {
+    let reader = input.csv_reader()?;
+    let records: Vec<Vec<String>> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("CSV 解析错误: {}", e))?;
+
+    if records.is_empty() {
+        println!("(CSV 数据为空)");
+        return Ok(());
+    }
+
+    let has_header = input.format().has_header();
+    let headers: Vec<String> = if has_header {
+        records[0].clone()
+    } else {
+        (0..records[0].len())
+            .map(|i| format!("column_{}", i))
+            .collect()
+    };
+    let data_start: usize = if has_header { 1 } else { 0 };
+    let data_rows = &records[data_start..];
+
+    let total_rows = data_rows.len();
+
+    if total_rows == 0 {
+        println!("(CSV 数据为空)");
+        return Ok(());
+    }
+
+    let str_headers: Vec<String> = if no_name {
+        (0..headers.len()).map(|i| format!("{}", i)).collect()
+    } else {
+        headers.clone()
+    };
+
+    let mut extended_headers = vec!["Row".to_string()];
+    extended_headers.extend(str_headers.clone());
+
+    let col_widths: Vec<usize> = extended_headers
+        .iter()
+        .map(|h| h.chars().count().max(10))
+        .collect();
+
+    println!("{}", extended_headers.join("\t"));
+
+    match selection {
+        RowSelection::Specific(nums) => {
+            for &row_idx in nums {
+                if row_idx >= total_rows {
+                    eprintln!(
+                        "警告: 行号 {} 超出范围（总行数: {}，最大有效行号: {}）",
+                        row_idx,
+                        total_rows,
+                        total_rows.saturating_sub(1)
+                    );
+                    continue;
+                }
+                let row = &data_rows[row_idx];
+                let mut display: Vec<String> = vec![row_idx.to_string()];
+                display.extend(row.iter().enumerate().map(|(i, c)| {
+                    let char_count = c.chars().count();
+                    if char_count > col_widths[i + 1] {
+                        let truncated: String =
+                            c.chars().take(col_widths[i + 1].saturating_sub(3)).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        c.clone()
+                    }
+                }));
+                println!("{}", display.join("\t"));
+            }
+        }
+        RowSelection::Range(start, end) => {
+            let start = *start;
+            let end = (*end).min(total_rows.saturating_sub(1));
+            if start > end {
+                anyhow::bail!("起始行号 {} 超出数据范围（总行数: {}）", start, total_rows);
+            }
+            if start >= total_rows {
+                anyhow::bail!(
+                    "起始行号 {} 超出数据范围（总行数: {}，最大有效行号: {}）",
+                    start,
+                    total_rows,
+                    total_rows.saturating_sub(1)
+                );
+            }
+            for (offset, row) in data_rows[start..=end].iter().enumerate() {
+                let actual_row = start + offset;
+                let mut display: Vec<String> = vec![actual_row.to_string()];
+                display.extend(row.iter().enumerate().map(|(i, c)| {
                     let char_count = c.chars().count();
                     if char_count > col_widths[i + 1] {
                         let truncated: String =

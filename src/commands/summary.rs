@@ -1,23 +1,40 @@
-use std::path::Path;
-
-use crate::commands::util::{self, compute_column_stats, ColumnStats, WordCount};
+use crate::commands::util::{self, compute_column_stats, ColumnStats, WordCount, input_to_file_format};
 use crate::config::ConfigManager;
-use crate::reader::readdata::FileFormat;
+use crate::input::{DataFormat, InputConfig};
 
-pub fn summary_data_file(file_path: &str, no_name: bool, force_csv: bool, csv_separator: Option<u8>, col_selection: Option<&str>) -> anyhow::Result<()> {
-    let format = if force_csv {
-        FileFormat::Csv
-    } else {
-        util::detect_file_format(file_path)
-            .ok_or_else(|| anyhow::anyhow!("不支持的文件格式: {}", file_path))?
-    };
-    let sep = if force_csv {
-        Some(csv_separator.unwrap_or(b','))
-    } else {
-        util::csv_separator_for_file(file_path)
-    };
+/// 统一入口
+pub fn summary_command(
+    input: &InputConfig,
+    no_name: bool,
+    col_selection: Option<&str>,
+) -> anyhow::Result<()> {
+    match input.format() {
+        DataFormat::Text => {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(summary_text(input))
+        }
+        DataFormat::Csv { .. } if input.file_path().is_some() => {
+            summary_data_file(input, no_name, col_selection)
+        }
+        DataFormat::Csv { .. } => summary_csv_stream(input, no_name, col_selection),
+        _ => summary_data_file(input, no_name, col_selection),
+    }
+}
 
-    let lf = crate::reader::readdata::read_to_lazyframe(file_path, format, sep, None)?;
+fn summary_data_file(
+    input: &InputConfig,
+    no_name: bool,
+    col_selection: Option<&str>,
+) -> anyhow::Result<()> {
+    let file_path = input.file_path().unwrap();
+    let (format, sep) = input_to_file_format(input);
+
+    let lf = crate::reader::readdata::read_to_lazyframe(
+        file_path.to_str().unwrap(),
+        format,
+        sep,
+        None,
+    )?;
     let df = lf.collect()?;
 
     let df = if let Some(col_str) = col_selection {
@@ -45,7 +62,6 @@ pub fn summary_data_file(file_path: &str, no_name: bool, force_csv: bool, csv_se
         } else {
             header.to_string()
         };
-
         let stats = compute_column_stats(&df, i, &name, true);
         all_stats.push(stats);
     }
@@ -56,9 +72,173 @@ pub fn summary_data_file(file_path: &str, no_name: bool, force_csv: bool, csv_se
     if !numeric_stats.is_empty() {
         print_numeric_summary_table(&numeric_stats);
     }
-
     if !string_stats.is_empty() {
         print_string_summary_section(&string_stats);
+    }
+
+    Ok(())
+}
+
+fn summary_csv_stream(
+    input: &InputConfig,
+    no_name: bool,
+    _col_selection: Option<&str>,
+) -> anyhow::Result<()> {
+    let reader = input.csv_reader()?;
+    let records: Vec<Vec<String>> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("CSV 解析错误: {}", e))?;
+
+    if records.is_empty() {
+        println!("=== CSV 总结 (stdin/bytes) ===");
+        println!("无数据");
+        return Ok(());
+    }
+
+    let has_header = input.format().has_header();
+    let headers: Vec<String> = if has_header {
+        records[0].clone()
+    } else {
+        (0..records[0].len())
+            .map(|i| format!("column_{}", i))
+            .collect()
+    };
+    let n_cols = headers.len();
+    let data_start: usize = if has_header { 1 } else { 0 };
+    let data_rows = &records[data_start..];
+    let n_rows = data_rows.len();
+
+    println!("=== CSV 总结 ===");
+    println!("数据规模: {} 行 {} 列", n_rows, n_cols);
+    println!();
+
+    for (i, h) in headers.iter().enumerate() {
+        let display_name = if no_name {
+            format!("{}", i)
+        } else {
+            h.clone()
+        };
+        let col_vals: Vec<&str> = data_rows
+            .iter()
+            .filter_map(|r| r.get(i).map(|s| s.as_str()))
+            .collect();
+        let non_empty: Vec<&&str> = col_vals.iter().filter(|s| !s.is_empty()).collect();
+        let count = non_empty.len();
+        let numeric_vals: Vec<f64> = non_empty
+            .iter()
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        let is_numeric = !non_empty.is_empty()
+            && numeric_vals.len() as f64 / non_empty.len() as f64 > 0.9;
+
+        println!("  列: {}", display_name);
+        println!("    类型: {}", if is_numeric { "numeric" } else { "string" });
+        println!("    非空数量: {}", count);
+
+        if is_numeric && !numeric_vals.is_empty() {
+            let sum: f64 = numeric_vals.iter().sum();
+            let mean = sum / numeric_vals.len() as f64;
+            let mut sorted = numeric_vals.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let min = sorted.first().unwrap();
+            let max = sorted.last().unwrap();
+            let zero_count = numeric_vals.iter().filter(|&&x| x == 0.0).count();
+            println!("    均值: {:.6}", mean);
+            println!("    最小值: {}", min);
+            println!("    最大值: {}", max);
+            println!("    零值数量: {}", zero_count);
+        }
+
+        if !is_numeric {
+            let all_text = col_vals.join(" ");
+            let wc = WordCount::from_text(&all_text);
+            println!("    英文词数: {}, 中文字数: {}", wc.en_words, wc.cn_chars);
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+async fn summary_text(input: &InputConfig) -> anyhow::Result<()> {
+    let mgr = ConfigManager::new()?;
+    let line_width = mgr.line_width();
+
+    let reader = input.text_reader()?;
+    let all_lines: Vec<String> = reader.collect::<std::io::Result<Vec<_>>>()?;
+    let full_text = all_lines.join("\n");
+
+    let wc = WordCount::from_text(&full_text);
+    let soft_lines = util::count_soft_lines(&full_text, line_width);
+    let paragraphs = util::count_paragraphs(&full_text);
+
+    println!("=== 文本文件总结 ===");
+    println!(
+        "英文词数: {} (去标点: {})",
+        wc.en_words,
+        util::en_words_only(&util::clean_punct(&full_text))
+    );
+    println!(
+        "中文字数: {} (去标点: {})",
+        wc.cn_chars,
+        util::cn_chars_only(&util::clean_punct(&full_text))
+    );
+    println!("行数(按{}字符宽度软换行): {}", line_width, soft_lines);
+    println!("段落数: {}", paragraphs);
+
+    let llm_configured = check_llm_configured(&mgr);
+    if !llm_configured {
+        return Ok(());
+    }
+
+    let api_key = match mgr.get_api_key_for_current_provider() {
+        Ok(key) => key,
+        Err(_) => {
+            return Ok(());
+        }
+    };
+
+    let provider = create_llm_provider(&mgr, &api_key);
+    match provider {
+        Ok(provider) => {
+            let paragraphs_text: Vec<&str> = full_text
+                .split("\n\n")
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+
+            if !paragraphs_text.is_empty() {
+                println!();
+                println!("--- 段落大意 (LLM) ---");
+                for (i, para) in paragraphs_text.iter().enumerate() {
+                    let para_clean: String = para
+                        .lines()
+                        .map(|l| l.trim())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if para_clean.len() > 2000 {
+                        let truncated = para_clean.chars().take(2000).collect::<String>();
+                        match summarize_paragraph(&*provider, &truncated, &mgr).await {
+                            Ok(summary) => println!("  段落 {}: {}", i + 1, summary),
+                            Err(_) => println!("  段落 {}: (LLM 调用失败)", i + 1),
+                        }
+                    } else {
+                        match summarize_paragraph(&*provider, &para_clean, &mgr).await {
+                            Ok(summary) => println!("  段落 {}: {}", i + 1, summary),
+                            Err(_) => println!("  段落 {}: (LLM 调用失败)", i + 1),
+                        }
+                    }
+                }
+            }
+
+            let overview = full_text.chars().take(3000).collect::<String>();
+            println!();
+            println!("--- 全文概述 (LLM) ---");
+            match summarize_overall(&*provider, &overview, &mgr).await {
+                Ok(summary) => println!("{}", summary),
+                Err(_) => println!("(LLM 调用失败)"),
+            }
+        }
+        Err(_) => {}
     }
 
     Ok(())
@@ -69,13 +249,18 @@ fn print_numeric_summary_table(stats: &[&ColumnStats]) {
 
     let label_width = 10usize;
 
-    let col_widths: Vec<usize> = stats.iter().map(|s| {
-        s.name.chars().count()
-            .max(format!("{:.6}", s.mean.unwrap_or(0.0)).len())
-            .max(format!("{}", s.count).len())
-            .max(s.dtype.len())
-            .max(6)
-    }).collect();
+    let col_widths: Vec<usize> = stats
+        .iter()
+        .map(|s| {
+            s.name
+                .chars()
+                .count()
+                .max(format!("{:.6}", s.mean.unwrap_or(0.0)).len())
+                .max(format!("{}", s.count).len())
+                .max(s.dtype.len())
+                .max(6)
+        })
+        .collect();
 
     let mut fmt_header = format!("{:<label_w$}", "", label_w = label_width);
     for (i, s) in stats.iter().enumerate() {
@@ -157,86 +342,6 @@ fn print_string_summary_section(stats: &[&ColumnStats]) {
     }
 }
 
-pub async fn summary_text_file(file_path: &str) -> anyhow::Result<()> {
-    let mgr = ConfigManager::new()?;
-    let line_width = mgr.line_width();
-
-    let path = Path::new(file_path);
-    let reader = crate::reader::readtext::FileReader::new(path)?;
-    let total_lines = reader.total_lines();
-
-    let mut reader = reader;
-    let all_lines = reader.read_segment(0, total_lines)?;
-    let full_text = all_lines.join("\n");
-
-    let wc = WordCount::from_text(&full_text);
-    let soft_lines = util::count_soft_lines(&full_text, line_width);
-    let paragraphs = util::count_paragraphs(&full_text);
-
-    println!("=== 文本文件总结 ===");
-    println!("英文词数: {} (去标点: {})", wc.en_words,
-        util::en_words_only(&util::clean_punct(&full_text)));
-    println!("中文字数: {} (去标点: {})", wc.cn_chars,
-        util::cn_chars_only(&util::clean_punct(&full_text)));
-    println!("行数(按{}字符宽度软换行): {}", line_width, soft_lines);
-    println!("段落数: {}", paragraphs);
-
-    let llm_configured = check_llm_configured(&mgr);
-    if !llm_configured {
-        return Ok(());
-    }
-
-    let api_key = match mgr.get_api_key_for_current_provider() {
-        Ok(key) => key,
-        Err(_) => {
-            return Ok(());
-        }
-    };
-
-    let provider = create_llm_provider(&mgr, &api_key);
-    match provider {
-        Ok(provider) => {
-            let paragraphs_text: Vec<&str> = full_text.split("\n\n")
-                .filter(|p| !p.trim().is_empty())
-                .collect();
-
-            if !paragraphs_text.is_empty() {
-                println!();
-                println!("--- 段落大意 (LLM) ---");
-                for (i, para) in paragraphs_text.iter().enumerate() {
-                    let para_clean: String = para.lines()
-                        .map(|l| l.trim())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if para_clean.len() > 2000 {
-                        let truncated = para_clean.chars().take(2000).collect::<String>();
-                        match summarize_paragraph(&*provider, &truncated, &mgr).await {
-                            Ok(summary) => println!("  段落 {}: {}", i + 1, summary),
-                            Err(_) => println!("  段落 {}: (LLM 调用失败)", i + 1),
-                        }
-                    } else {
-                        match summarize_paragraph(&*provider, &para_clean, &mgr).await {
-                            Ok(summary) => println!("  段落 {}: {}", i + 1, summary),
-                            Err(_) => println!("  段落 {}: (LLM 调用失败)", i + 1),
-                        }
-                    }
-                }
-            }
-
-            let overview = full_text.chars().take(3000).collect::<String>();
-            println!();
-            println!("--- 全文概述 (LLM) ---");
-            match summarize_overall(&*provider, &overview, &mgr).await {
-                Ok(summary) => println!("{}", summary),
-                Err(_) => println!("(LLM 调用失败)"),
-            }
-        }
-        Err(_) => {}
-    }
-
-    Ok(())
-}
-
 fn check_llm_configured(mgr: &ConfigManager) -> bool {
     let cfg = mgr.config();
     !cfg.llm.provider.is_empty()
@@ -262,9 +367,7 @@ pub fn create_llm_provider(
                 .with_base_url(&cfg.llm.base_url);
             Ok(Box::new(p))
         }
-        _ => {
-            anyhow::bail!("不支持的 LLM 供应商: {}", cfg.llm.provider)
-        }
+        _ => anyhow::bail!("不支持的 LLM 供应商: {}", cfg.llm.provider),
     }
 }
 

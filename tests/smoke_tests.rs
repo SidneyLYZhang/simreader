@@ -1,10 +1,49 @@
-use simreader::config::{AppConfig, ConfigManager, ReasoningEffort};
+//! 冒烟测试：覆盖输入模块、命令入口、工具函数、读取器、配置与 LLM 类型。
+//!
+//! 所有基于文件的测试通过 `create_temp_file` 在系统临时目录动态创建测试数据。
+
 use simreader::commands::util;
+use simreader::commands::rows::{parse_rows, RowSelection};
+use simreader::config::{AppConfig, ConfigManager, ReasoningEffort};
+use simreader::input::{DataFormat, InputConfig, InputSource};
 use simreader::llm;
 use simreader::reader;
 use simreader::reader::readdata::FileFormat;
 
 use std::io::Write;
+
+// ============================================================================
+// 测试辅助函数
+// ============================================================================
+
+fn create_temp_file(name: &str, content: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("simreader_smoke_test_files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    path
+}
+
+/// 创建一个基于文件的 InputConfig
+fn file_input(path: &std::path::Path, format: DataFormat) -> InputConfig {
+    InputConfig {
+        source: InputSource::File(path.to_path_buf()),
+        format,
+    }
+}
+
+/// 创建一个基于内存字节的 InputConfig（模拟 stdin/管道输入）
+fn bytes_input(data: Vec<u8>, format: DataFormat) -> InputConfig {
+    InputConfig {
+        source: InputSource::Bytes(data),
+        format,
+    }
+}
+
+// ============================================================================
+// 1. Config 模块测试
+// ============================================================================
 
 #[test]
 fn smoke_config_default() {
@@ -69,6 +108,10 @@ fn smoke_reasoning_effort_as_high_or_max() {
     assert_eq!(ReasoningEffort::Max.as_high_or_max(), "max");
 }
 
+// ============================================================================
+// 2. LLM 类型测试
+// ============================================================================
+
 #[test]
 fn smoke_chat_message_creation() {
     let sys = llm::ChatMessage::system("你是助手");
@@ -119,6 +162,54 @@ fn smoke_thinking_config_default() {
     assert_eq!(config.max_tokens, None);
     assert!(!config.exclude);
 }
+
+#[test]
+fn smoke_chat_request_serialization() {
+    let request = llm::ChatRequest {
+        model: "test-model".into(),
+        messages: vec![
+            llm::ChatMessage::system("sys"),
+            llm::ChatMessage::user("query"),
+        ],
+        temperature: Some(0.7),
+        max_tokens: Some(100),
+        top_p: Some(0.9),
+        thinking: None,
+        files: vec![],
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed["model"], "test-model");
+    assert_eq!(parsed["messages"][0]["role"], "system");
+    assert_eq!(parsed["messages"][1]["role"], "user");
+    assert_eq!(parsed["temperature"], 0.7);
+    assert_eq!(parsed["max_tokens"], 100);
+    assert_eq!(parsed["top_p"], 0.9);
+}
+
+#[test]
+fn smoke_thinking_config_serialization() {
+    let config = llm::ThinkingConfig {
+        enabled: true,
+        effort: Some(ReasoningEffort::XHigh),
+        max_tokens: Some(4096),
+        exclude: false,
+    };
+
+    let json = serde_json::to_string(&config).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed["enabled"], true);
+    assert_eq!(parsed["effort"], "xhigh");
+    assert_eq!(parsed["max_tokens"], 4096);
+    assert_eq!(parsed["exclude"], false);
+}
+
+// ============================================================================
+// 3. Input 模块 — 格式检测
+// ============================================================================
 
 #[test]
 fn smoke_detect_file_format() {
@@ -186,6 +277,204 @@ fn smoke_csv_separator_for_file() {
 }
 
 #[test]
+fn smoke_file_format_debug() {
+    assert_eq!(format!("{:?}", FileFormat::Csv), "Csv");
+    assert_eq!(format!("{:?}", FileFormat::Json), "Json");
+    assert_eq!(format!("{:?}", FileFormat::Ipc), "Ipc");
+    assert_eq!(format!("{:?}", FileFormat::Parquet), "Parquet");
+    assert_eq!(format!("{:?}", FileFormat::Excel), "Excel");
+}
+
+// ============================================================================
+// 4. Input 模块 — TextReader（文本行流式读取）
+// ============================================================================
+
+#[test]
+fn smoke_text_reader_from_file() {
+    let path = create_temp_file("tr_file.txt", "line1\nline2\nline3\nline4\nline5\n");
+    let input = file_input(&path, DataFormat::Text);
+    let reader = input.text_reader().unwrap();
+    let lines: Vec<String> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(lines, vec!["line1", "line2", "line3", "line4", "line5"]);
+}
+
+#[test]
+fn smoke_text_reader_from_bytes() {
+    let data = b"hello\nworld\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    let reader = input.text_reader().unwrap();
+    let lines: Vec<String> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(lines, vec!["hello", "world"]);
+}
+
+#[test]
+fn smoke_text_reader_empty() {
+    let input = bytes_input(vec![], DataFormat::Text);
+    let reader = input.text_reader().unwrap();
+    let lines: Vec<String> = reader.map(|r| r.unwrap()).collect();
+    assert!(lines.is_empty());
+}
+
+#[test]
+fn smoke_text_reader_crlf() {
+    let data = b"line1\r\nline2\r\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    let reader = input.text_reader().unwrap();
+    let lines: Vec<String> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(lines, vec!["line1", "line2"]);
+}
+
+// ============================================================================
+// 5. Input 模块 — CsvReader（CSV 记录流式读取）
+// ============================================================================
+
+#[test]
+fn smoke_csv_reader_from_file() {
+    let path = create_temp_file("cr_file.csv", "name,age\nAlice,30\nBob,25\n");
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], vec!["Alice", "30"]);
+    assert_eq!(records[1], vec!["Bob", "25"]);
+}
+
+#[test]
+fn smoke_csv_reader_from_bytes() {
+    let data = b"col1,col2\nval1,val2\nval3,val4\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], vec!["val1", "val2"]);
+    assert_eq!(records[1], vec!["val3", "val4"]);
+}
+
+#[test]
+fn smoke_csv_reader_no_header() {
+    let data = b"Alice,30\nBob,25\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: false,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(records.len(), 2);
+}
+
+#[test]
+fn smoke_csv_reader_tab_separator() {
+    let data = b"name\tage\nAlice\t30\nBob\t25\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b'\t',
+            has_header: true,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], vec!["Alice", "30"]);
+}
+
+#[test]
+fn smoke_csv_reader_pipe_separator() {
+    let data = b"A|B|C\n1|2|3\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b'|',
+            has_header: true,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0], vec!["1", "2", "3"]);
+}
+
+#[test]
+fn smoke_csv_reader_empty() {
+    let input = bytes_input(
+        vec![],
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    let reader = input.csv_reader().unwrap();
+    let records: Vec<Vec<String>> = reader.map(|r| r.unwrap()).collect();
+    assert!(records.is_empty());
+}
+
+// ============================================================================
+// 6. Input 模块 — read_to_string
+// ============================================================================
+
+#[test]
+fn smoke_read_to_string_file() {
+    let path = create_temp_file("rts.txt", "Hello\nWorld\n");
+    let input = file_input(&path, DataFormat::Text);
+    let s = input.read_to_string().unwrap();
+    assert_eq!(s, "Hello\nWorld\n");
+}
+
+#[test]
+fn smoke_read_to_string_bytes() {
+    let input = bytes_input(b"hello world".to_vec(), DataFormat::Text);
+    let s = input.read_to_string().unwrap();
+    assert_eq!(s, "hello world");
+}
+
+// ============================================================================
+// 7. Input 模块 — file_path / format 访问器
+// ============================================================================
+
+#[test]
+fn smoke_input_config_file_path() {
+    let path = create_temp_file("fp.txt", "test");
+    let input = file_input(&path, DataFormat::Text);
+    assert!(input.file_path().is_some());
+    assert_eq!(input.file_path().unwrap().file_name().unwrap(), "fp.txt");
+
+    let input_bytes = bytes_input(b"test".to_vec(), DataFormat::Text);
+    assert!(input_bytes.file_path().is_none());
+}
+
+#[test]
+fn smoke_input_config_format_accessor() {
+    let input = bytes_input(
+        b"".to_vec(),
+        DataFormat::Csv {
+            delimiter: b'|',
+            has_header: false,
+        },
+    );
+    assert_eq!(input.format().delimiter(), b'|');
+    assert!(!input.format().has_header());
+}
+
+// ============================================================================
+// 8. util — 词数统计与文本处理
+// ============================================================================
+
+#[test]
 fn smoke_word_count_english() {
     let text = "Hello world! This is a test. How are you?";
     let wc = util::WordCount::from_text(text);
@@ -243,6 +532,10 @@ fn smoke_total_words() {
     assert_eq!(util::total_words("Hello 世界！"), 3);
     assert_eq!(util::total_words(""), 0);
 }
+
+// ============================================================================
+// 9. util — 文本换行
+// ============================================================================
 
 #[test]
 fn smoke_wrap_text_en_basic() {
@@ -322,14 +615,9 @@ fn smoke_count_paragraphs_with_blank_lines() {
     assert_eq!(util::count_paragraphs(text), 2);
 }
 
-fn create_temp_file(name: &str, content: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("simreader_smoke_test_files");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
-    let mut file = std::fs::File::create(&path).unwrap();
-    file.write_all(content.as_bytes()).unwrap();
-    path
-}
+// ============================================================================
+// 10. reader::readtext — FileReader
+// ============================================================================
 
 #[test]
 fn smoke_file_reader_basic() {
@@ -387,17 +675,20 @@ fn smoke_file_reader_iterator() {
     let path = create_temp_file("test_iter.txt", "line1\nline2\nline3\n");
     let mut reader = reader::readtext::FileReader::new(&path).unwrap();
 
-    let lines: Vec<String> = (&mut reader)
-        .map(|r| r.unwrap())
-        .collect();
+    let lines: Vec<String> = (&mut reader).map(|r| r.unwrap()).collect();
 
     assert_eq!(lines, vec!["line1", "line2", "line3"]);
     assert_eq!(reader.current_line_number(), 3);
 }
 
+// ============================================================================
+// 11. reader::readdata — Polars 文件读取
+// ============================================================================
+
 #[test]
 fn smoke_read_csv_to_lazyframe() {
-    let path = create_temp_file("test_csv.csv", "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\n");
+    let path =
+        create_temp_file("test_csv.csv", "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -454,6 +745,22 @@ fn smoke_read_json_to_lazyframe() {
     let df = lf.collect().unwrap();
     assert_eq!(df.height(), 3);
 }
+
+#[test]
+fn smoke_read_to_lazyframe_nonexistent_file_collect_fails() {
+    let result = reader::readdata::read_to_lazyframe(
+        "nonexistent_file_xyz.xyz",
+        FileFormat::Csv,
+        Some(b','),
+        None,
+    );
+    let lf = result.unwrap();
+    assert!(lf.collect().is_err());
+}
+
+// ============================================================================
+// 12. util — 列统计与列选择
+// ============================================================================
 
 #[test]
 fn smoke_compute_column_stats_numeric() {
@@ -546,10 +853,7 @@ fn smoke_parse_col_selection_empty_errors() {
 
 #[test]
 fn smoke_resolve_col_selection_indices() {
-    let path = create_temp_file(
-        "test_resolve.csv",
-        "name,age,score\nAlice,30,95\n",
-    );
+    let path = create_temp_file("test_resolve.csv", "name,age,score\nAlice,30,95\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -567,10 +871,7 @@ fn smoke_resolve_col_selection_indices() {
 
 #[test]
 fn smoke_resolve_col_selection_names() {
-    let path = create_temp_file(
-        "test_resolve2.csv",
-        "name,age,score\nAlice,30,95\n",
-    );
+    let path = create_temp_file("test_resolve2.csv", "name,age,score\nAlice,30,95\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -588,10 +889,7 @@ fn smoke_resolve_col_selection_names() {
 
 #[test]
 fn smoke_resolve_col_selection_invalid_index() {
-    let path = create_temp_file(
-        "test_resolve3.csv",
-        "name,age\nAlice,30\n",
-    );
+    let path = create_temp_file("test_resolve3.csv", "name,age\nAlice,30\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -608,10 +906,7 @@ fn smoke_resolve_col_selection_invalid_index() {
 
 #[test]
 fn smoke_resolve_col_selection_invalid_name() {
-    let path = create_temp_file(
-        "test_resolve4.csv",
-        "name,age\nAlice,30\n",
-    );
+    let path = create_temp_file("test_resolve4.csv", "name,age\nAlice,30\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -628,10 +923,7 @@ fn smoke_resolve_col_selection_invalid_name() {
 
 #[test]
 fn smoke_transposed_stats() {
-    let path = create_temp_file(
-        "test_trans.csv",
-        "name,a,b\nrow1,10.0,20.0\nrow2,30.0,40.0\n",
-    );
+    let path = create_temp_file("test_trans.csv", "name,a,b\nrow1,10.0,20.0\nrow2,30.0,40.0\n");
 
     let lf = reader::readdata::read_to_lazyframe(
         path.to_str().unwrap(),
@@ -647,135 +939,92 @@ fn smoke_transposed_stats() {
     assert_eq!(stats[0].name, "\"row1\"");
 }
 
-#[test]
-fn smoke_file_format_debug() {
-    assert_eq!(format!("{:?}", FileFormat::Csv), "Csv");
-    assert_eq!(format!("{:?}", FileFormat::Json), "Json");
-    assert_eq!(format!("{:?}", FileFormat::Ipc), "Ipc");
-    assert_eq!(format!("{:?}", FileFormat::Parquet), "Parquet");
-    assert_eq!(format!("{:?}", FileFormat::Excel), "Excel");
-}
+// ============================================================================
+// 13. head 命令 — 统一入口
+// ============================================================================
 
 #[test]
-fn smoke_chat_request_serialization() {
-    let request = llm::ChatRequest {
-        model: "test-model".into(),
-        messages: vec![
-            llm::ChatMessage::system("sys"),
-            llm::ChatMessage::user("query"),
-        ],
-        temperature: Some(0.7),
-        max_tokens: Some(100),
-        top_p: Some(0.9),
-        thinking: None,
-        files: vec![],
-    };
-
-    let json = serde_json::to_string(&request).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(parsed["model"], "test-model");
-    assert_eq!(parsed["messages"][0]["role"], "system");
-    assert_eq!(parsed["messages"][0]["content"], "sys");
-    assert_eq!(parsed["messages"][1]["role"], "user");
-    assert_eq!(parsed["messages"][1]["content"], "query");
-    assert_eq!(parsed["temperature"], 0.7);
-    assert_eq!(parsed["max_tokens"], 100);
-    assert_eq!(parsed["top_p"], 0.9);
-}
-
-#[test]
-fn smoke_thinking_config_serialization() {
-    let config = llm::ThinkingConfig {
-        enabled: true,
-        effort: Some(ReasoningEffort::XHigh),
-        max_tokens: Some(4096),
-        exclude: false,
-    };
-
-    let json = serde_json::to_string(&config).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(parsed["enabled"], true);
-    assert_eq!(parsed["effort"], "xhigh");
-    assert_eq!(parsed["max_tokens"], 4096);
-    assert_eq!(parsed["exclude"], false);
-}
-
-#[test]
-fn smoke_head_data_file() {
+fn smoke_head_csv_file() {
     let path = create_temp_file(
         "test_head.csv",
         "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\nDave,28,76.0\nEve,32,89.5\n",
     );
-
-    simreader::commands::head::head_data_file(
-        path.to_str().unwrap(),
-        3,
-        false,
-        80,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
-}
-
-#[test]
-fn smoke_head_data_file_no_name() {
-    let path = create_temp_file(
-        "test_head_noname.csv",
-        "name,age\nAlice,30\nBob,25\nCarol,35\n",
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
     );
-
-    simreader::commands::head::head_data_file(
-        path.to_str().unwrap(),
-        2,
-        true,
-        80,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+    simreader::commands::head::head_command(&input, 3, false, 80, None).unwrap();
 }
 
 #[test]
-fn smoke_head_data_file_with_col_selection() {
-    let path = create_temp_file(
-        "test_head_col.csv",
-        "name,age,score\nAlice,30,95\nBob,25,88\n",
+fn smoke_head_csv_file_no_name() {
+    let path = create_temp_file("test_head_noname.csv", "name,age\nAlice,30\nBob,25\nCarol,35\n");
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
     );
-
-    simreader::commands::head::head_data_file(
-        path.to_str().unwrap(),
-        2,
-        false,
-        80,
-        false,
-        None,
-        Some("name,score"),
-    )
-    .unwrap();
+    simreader::commands::head::head_command(&input, 2, true, 80, None).unwrap();
 }
 
 #[test]
-fn smoke_head_data_file_force_csv() {
+fn smoke_head_csv_file_with_col_selection() {
+    let path = create_temp_file("test_head_col.csv", "name,age,score\nAlice,30,95\nBob,25,88\n");
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::head::head_command(&input, 2, false, 80, Some("name,score")).unwrap();
+}
+
+#[test]
+fn smoke_head_csv_file_force_csv_on_unknown_ext() {
     let path = create_temp_file(
         "test_head_force.dat",
         "col1,col2\nval1,val2\nval3,val4\n",
     );
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::head::head_command(&input, 2, false, 80, None).unwrap();
+}
 
-    simreader::commands::head::head_data_file(
-        path.to_str().unwrap(),
-        2,
-        false,
-        80,
-        true,
-        Some(b','),
-        None,
-    )
-    .unwrap();
+#[test]
+fn smoke_head_csv_from_bytes() {
+    let data = b"name,age\nAlice,30\nBob,25\nCarol,35\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::head::head_command(&input, 2, false, 80, None).unwrap();
+}
+
+#[test]
+fn smoke_head_csv_from_bytes_no_header() {
+    let data = b"Alice,30\nBob,25\nCarol,35\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: false,
+        },
+    );
+    simreader::commands::head::head_command(&input, 2, false, 80, None).unwrap();
 }
 
 #[test]
@@ -784,102 +1033,138 @@ fn smoke_head_text_file() {
         "test_head_text.txt",
         "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n",
     );
-
-    simreader::commands::head::head_text_file(path.to_str().unwrap(), 3, 80).unwrap();
+    let input = file_input(&path, DataFormat::Text);
+    simreader::commands::head::head_command(&input, 3, false, 80, None).unwrap();
 }
 
 #[test]
-fn smoke_tail_data_file() {
+fn smoke_head_text_from_bytes() {
+    let data = b"A\nB\nC\nD\nE\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    simreader::commands::head::head_command(&input, 3, false, 80, None).unwrap();
+}
+
+#[test]
+fn smoke_head_text_n_larger_than_total() {
+    let data = b"line1\nline2\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    simreader::commands::head::head_command(&input, 10, false, 80, None).unwrap();
+}
+
+// ============================================================================
+// 14. tail 命令 — 统一入口
+// ============================================================================
+
+#[test]
+fn smoke_tail_csv_file() {
     let path = create_temp_file(
         "test_tail.csv",
         "name,age\nAlice,30\nBob,25\nCarol,35\nDave,28\nEve,32\n",
     );
-
-    simreader::commands::tail::tail_data_file(
-        path.to_str().unwrap(),
-        2,
-        false,
-        80,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::tail::tail_command(&input, 2, false, 80, None).unwrap();
 }
 
 #[test]
-fn smoke_tail_data_file_more_than_total() {
-    let path = create_temp_file(
-        "test_tail_overflow.csv",
-        "name,age\nAlice,30\nBob,25\n",
+fn smoke_tail_csv_file_more_than_total() {
+    let path = create_temp_file("test_tail_overflow.csv", "name,age\nAlice,30\nBob,25\n");
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
     );
+    simreader::commands::tail::tail_command(&input, 10, false, 80, None).unwrap();
+}
 
-    simreader::commands::tail::tail_data_file(
-        path.to_str().unwrap(),
-        10,
-        false,
-        80,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+#[test]
+fn smoke_tail_csv_from_bytes() {
+    let data = b"name,age\nAlice,30\nBob,25\nCarol,35\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::tail::tail_command(&input, 2, false, 80, None).unwrap();
 }
 
 #[test]
 fn smoke_tail_text_file() {
-    let path = create_temp_file(
-        "test_tail_text.txt",
-        "A\nB\nC\nD\nE\n",
-    );
-
-    simreader::commands::tail::tail_text_file(path.to_str().unwrap(), 2, 80).unwrap();
+    let path = create_temp_file("test_tail_text.txt", "A\nB\nC\nD\nE\n");
+    let input = file_input(&path, DataFormat::Text);
+    simreader::commands::tail::tail_command(&input, 2, false, 80, None).unwrap();
 }
 
 #[test]
 fn smoke_tail_text_file_more_than_total() {
-    let path = create_temp_file(
-        "test_tail_text_overflow.txt",
-        "X\nY\n",
-    );
-
-    simreader::commands::tail::tail_text_file(path.to_str().unwrap(), 10, 80).unwrap();
+    let path = create_temp_file("test_tail_text_overflow.txt", "X\nY\n");
+    let input = file_input(&path, DataFormat::Text);
+    simreader::commands::tail::tail_command(&input, 10, false, 80, None).unwrap();
 }
 
 #[test]
-fn smoke_schema_data_file_col_direction() {
+fn smoke_tail_text_from_bytes() {
+    let data = b"L1\nL2\nL3\nL4\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    simreader::commands::tail::tail_command(&input, 2, false, 80, None).unwrap();
+}
+
+// ============================================================================
+// 15. schema 命令 — 统一入口
+// ============================================================================
+
+#[test]
+fn smoke_schema_csv_file_col() {
     let path = create_temp_file(
         "test_schema.csv",
         "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\n",
     );
-
-    simreader::commands::schema::schema_data_file(
-        path.to_str().unwrap(),
-        "col",
-        false,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::schema::schema_command(&input, "col", false, None).unwrap();
 }
 
 #[test]
-fn smoke_schema_data_file_row_direction() {
+fn smoke_schema_csv_file_row() {
     let path = create_temp_file(
         "test_schema_row.csv",
         "name,age,score\nAlice,30,95.5\nBob,25,88.0\n",
     );
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::schema::schema_command(&input, "row", false, None).unwrap();
+}
 
-    simreader::commands::schema::schema_data_file(
-        path.to_str().unwrap(),
-        "row",
-        false,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+#[test]
+fn smoke_schema_csv_from_bytes() {
+    let data = b"col1,col2\nval1,val2\nval3,val4\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::schema::schema_command(&input, "col", false, None).unwrap();
 }
 
 #[test]
@@ -888,52 +1173,215 @@ fn smoke_schema_text_file() {
         "test_schema_text.txt",
         "Hello world this is a test file.\nIt has multiple lines.\n中文字符也支持。\n",
     );
-
-    simreader::commands::schema::schema_text_file(path.to_str().unwrap()).unwrap();
+    let input = file_input(&path, DataFormat::Text);
+    simreader::commands::schema::schema_command(&input, "col", false, None).unwrap();
 }
 
 #[test]
-fn smoke_summary_data_file() {
+fn smoke_schema_text_from_bytes() {
+    let data = b"Hello world\nThis is a test\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    simreader::commands::schema::schema_command(&input, "col", false, None).unwrap();
+}
+
+// ============================================================================
+// 16. summary 命令 — 统一入口
+// ============================================================================
+
+#[test]
+fn smoke_summary_csv_file() {
     let path = create_temp_file(
         "test_summary.csv",
         "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\n",
     );
-
-    simreader::commands::summary::summary_data_file(
-        path.to_str().unwrap(),
-        false,
-        false,
-        None,
-        None,
-    )
-    .unwrap();
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::summary::summary_command(&input, false, None).unwrap();
 }
 
 #[test]
-fn smoke_summary_data_file_with_col_selection() {
+fn smoke_summary_csv_file_with_col_selection() {
     let path = create_temp_file(
         "test_summary_col.csv",
         "name,age,score\nAlice,30,95.5\nBob,25,88.0\nCarol,35,92.3\n",
     );
-
-    simreader::commands::summary::summary_data_file(
-        path.to_str().unwrap(),
-        false,
-        false,
-        None,
-        Some("age,score"),
-    )
-    .unwrap();
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    simreader::commands::summary::summary_command(&input, false, Some("age,score")).unwrap();
 }
 
 #[test]
-fn smoke_read_to_lazyframe_nonexistent_file_collect_fails() {
-    let result = reader::readdata::read_to_lazyframe(
-        "nonexistent_file_xyz.xyz",
-        FileFormat::Csv,
-        Some(b','),
-        None,
+fn smoke_summary_csv_from_bytes() {
+    let data = b"x,y\n1,2\n3,4\n5,6\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
     );
-    let lf = result.unwrap();
-    assert!(lf.collect().is_err());
+    simreader::commands::summary::summary_command(&input, false, None).unwrap();
+}
+
+// ============================================================================
+// 17. rows 命令 — parse_rows
+// ============================================================================
+
+#[test]
+fn smoke_parse_rows_specific() {
+    let sel = parse_rows("2,5,9").unwrap();
+    match sel {
+        RowSelection::Specific(nums) => assert_eq!(nums, vec![2, 5, 9]),
+        _ => panic!("expected Specific"),
+    }
+}
+
+#[test]
+fn smoke_parse_rows_range() {
+    let sel = parse_rows("3:7").unwrap();
+    match sel {
+        RowSelection::Range(start, end) => {
+            assert_eq!(start, 3);
+            assert_eq!(end, 7);
+        }
+        _ => panic!("expected Range"),
+    }
+}
+
+#[test]
+fn smoke_parse_rows_empty_errors() {
+    assert!(parse_rows("").is_err());
+}
+
+#[test]
+fn smoke_parse_rows_range_start_gt_end_errors() {
+    assert!(parse_rows("5:2").is_err());
+}
+
+#[test]
+fn smoke_parse_rows_invalid_format_errors() {
+    assert!(parse_rows("1:2:3").is_err());
+    assert!(parse_rows("abc").is_err());
+}
+
+// ============================================================================
+// 18. rows 命令 — 统一入口
+// ============================================================================
+
+#[test]
+fn smoke_rows_text_file() {
+    let path = create_temp_file(
+        "test_rows.txt",
+        "L0\nL1\nL2\nL3\nL4\nL5\n",
+    );
+    let input = file_input(&path, DataFormat::Text);
+    let sel = RowSelection::Specific(vec![1, 3, 5]);
+    simreader::commands::rows::rows_command(&input, &sel, false, 80, false, None).unwrap();
+}
+
+#[test]
+fn smoke_rows_text_range() {
+    let path = create_temp_file(
+        "test_rows_range.txt",
+        "L0\nL1\nL2\nL3\nL4\n",
+    );
+    let input = file_input(&path, DataFormat::Text);
+    let sel = RowSelection::Range(1, 3);
+    simreader::commands::rows::rows_command(&input, &sel, false, 80, false, None).unwrap();
+}
+
+#[test]
+fn smoke_rows_text_from_bytes() {
+    let data = b"row0\nrow1\nrow2\nrow3\n".to_vec();
+    let input = bytes_input(data, DataFormat::Text);
+    let sel = RowSelection::Specific(vec![0, 2]);
+    simreader::commands::rows::rows_command(&input, &sel, false, 80, false, None).unwrap();
+}
+
+#[test]
+fn smoke_rows_csv_file() {
+    let path = create_temp_file(
+        "test_rows_csv.csv",
+        "name,age\nAlice,30\nBob,25\nCarol,35\n",
+    );
+    let input = file_input(
+        &path,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    let sel = RowSelection::Specific(vec![0, 2]);
+    simreader::commands::rows::rows_command(&input, &sel, false, 80, false, None).unwrap();
+}
+
+#[test]
+fn smoke_rows_csv_from_bytes() {
+    let data = b"col1,col2\nval1,val2\nval3,val4\nval5,val6\n".to_vec();
+    let input = bytes_input(
+        data,
+        DataFormat::Csv {
+            delimiter: b',',
+            has_header: true,
+        },
+    );
+    let sel = RowSelection::Range(0, 1);
+    simreader::commands::rows::rows_command(&input, &sel, false, 80, false, None).unwrap();
+}
+
+// ============================================================================
+// 19. DataFormat ↔ reader::FileFormat 桥接
+// ============================================================================
+
+#[test]
+fn smoke_input_to_file_format_csv() {
+    let input = bytes_input(
+        b"".to_vec(),
+        DataFormat::Csv {
+            delimiter: b'|',
+            has_header: true,
+        },
+    );
+    let (fmt, sep) = util::input_to_file_format(&input);
+    assert!(matches!(fmt, FileFormat::Csv));
+    assert_eq!(sep, Some(b'|'));
+}
+
+#[test]
+fn smoke_input_to_file_format_json() {
+    let input = bytes_input(b"".to_vec(), DataFormat::Json);
+    let (fmt, sep) = util::input_to_file_format(&input);
+    assert!(matches!(fmt, FileFormat::Json));
+    assert_eq!(sep, None);
+}
+
+#[test]
+fn smoke_input_to_file_format_ipc() {
+    let input = bytes_input(b"".to_vec(), DataFormat::Ipc);
+    let (fmt, _) = util::input_to_file_format(&input);
+    assert!(matches!(fmt, FileFormat::Ipc));
+}
+
+#[test]
+fn smoke_input_to_file_format_parquet() {
+    let input = bytes_input(b"".to_vec(), DataFormat::Parquet);
+    let (fmt, _) = util::input_to_file_format(&input);
+    assert!(matches!(fmt, FileFormat::Parquet));
+}
+
+#[test]
+fn smoke_input_to_file_format_excel() {
+    let input = bytes_input(b"".to_vec(), DataFormat::Excel);
+    let (fmt, _) = util::input_to_file_format(&input);
+    assert!(matches!(fmt, FileFormat::Excel));
 }

@@ -3,6 +3,21 @@ use std::collections::HashMap;
 use polars::prelude::*;
 use regex::Regex;
 
+use crate::input::{DataFormat, InputConfig};
+use crate::reader::readdata::FileFormat;
+
+/// 将 `InputConfig` 的 `DataFormat` 转换为 reader 模块需要的 `FileFormat` + 分隔符
+pub fn input_to_file_format(input: &InputConfig) -> (FileFormat, Option<u8>) {
+    match input.format() {
+        DataFormat::Csv { delimiter, .. } => (FileFormat::Csv, Some(*delimiter)),
+        DataFormat::Json => (FileFormat::Json, None),
+        DataFormat::Ipc => (FileFormat::Ipc, None),
+        DataFormat::Parquet => (FileFormat::Parquet, None),
+        DataFormat::Excel => (FileFormat::Excel, None),
+        DataFormat::Text => (FileFormat::Csv, None), // fallback
+    }
+}
+
 pub fn detect_file_format(file_path: &str) -> Option<crate::reader::readdata::FileFormat> {
     let lower = file_path.to_lowercase();
     if lower.ends_with(".csv") {

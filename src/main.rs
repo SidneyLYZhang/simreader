@@ -2,10 +2,13 @@
 
 mod commands;
 mod config;
+mod input;
 mod llm;
 mod reader;
 
 use clap::{arg, Arg, ArgAction, Command};
+
+use crate::input::InputConfig;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -319,6 +322,7 @@ fn main() {
         )
         .get_matches();
 
+    // ---- config 子命令 ----
     if let Some(sub_matches) = matches.subcommand_matches("config") {
         let had_any = sub_matches.contains_id("provider")
             || sub_matches.contains_id("model")
@@ -403,12 +407,15 @@ fn main() {
         return;
     }
 
+    // ---- head 子命令 ----
     if let Some(sub_matches) = matches.subcommand_matches("head") {
         let file = sub_matches.get_one::<String>("FILE").unwrap();
-        let n: usize = sub_matches.get_one::<String>("num").unwrap().parse().unwrap_or(5);
+        let n: usize = sub_matches
+            .get_one::<String>("num")
+            .unwrap()
+            .parse()
+            .unwrap_or(5);
         let no_name = sub_matches.get_flag("no_name");
-        let force_csv = sub_matches.get_flag("csv");
-        let separator = extract_separator(sub_matches);
         let col_selection = sub_matches.get_one::<String>("col").map(|s| s.as_str());
 
         let mgr = match config::ConfigManager::new() {
@@ -420,26 +427,32 @@ fn main() {
         };
         let line_width = mgr.line_width();
 
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::head::head_data_file(file, n, no_name, line_width, force_csv, separator, col_selection) {
+        let input = match InputConfig::from_cli(sub_matches, Some(file)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
                 eprintln!("错误: {}", e);
                 std::process::exit(1);
             }
-        } else {
-            if let Err(e) = commands::head::head_text_file(file, n, line_width) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
+        };
+
+        if let Err(e) =
+            commands::head::head_command(&input, n, no_name, line_width, col_selection)
+        {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
         }
         return;
     }
 
+    // ---- tail 子命令 ----
     if let Some(sub_matches) = matches.subcommand_matches("tail") {
         let file = sub_matches.get_one::<String>("FILE").unwrap();
-        let n: usize = sub_matches.get_one::<String>("num").unwrap().parse().unwrap_or(5);
+        let n: usize = sub_matches
+            .get_one::<String>("num")
+            .unwrap()
+            .parse()
+            .unwrap_or(5);
         let no_name = sub_matches.get_flag("no_name");
-        let force_csv = sub_matches.get_flag("csv");
-        let separator = extract_separator(sub_matches);
         let col_selection = sub_matches.get_one::<String>("col").map(|s| s.as_str());
 
         let mgr = match config::ConfigManager::new() {
@@ -451,26 +464,31 @@ fn main() {
         };
         let line_width = mgr.line_width();
 
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::tail::tail_data_file(file, n, no_name, line_width, force_csv, separator, col_selection) {
+        let input = match InputConfig::from_cli(sub_matches, Some(file)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
                 eprintln!("错误: {}", e);
                 std::process::exit(1);
             }
-        } else {
-            if let Err(e) = commands::tail::tail_text_file(file, n, line_width) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
+        };
+
+        if let Err(e) =
+            commands::tail::tail_command(&input, n, no_name, line_width, col_selection)
+        {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
         }
         return;
     }
 
+    // ---- schema 子命令 ----
     if let Some(sub_matches) = matches.subcommand_matches("schema") {
         let file = sub_matches.get_one::<String>("FILE").unwrap();
-        let direction = sub_matches.get_one::<String>("direction").map(|s| s.as_str()).unwrap_or("col");
+        let direction = sub_matches
+            .get_one::<String>("direction")
+            .map(|s| s.as_str())
+            .unwrap_or("col");
         let no_name = sub_matches.get_flag("no_name");
-        let force_csv = sub_matches.get_flag("csv");
-        let separator = extract_separator(sub_matches);
         let col_selection = sub_matches.get_one::<String>("col").map(|s| s.as_str());
 
         if direction != "col" && direction != "row" {
@@ -478,53 +496,69 @@ fn main() {
             std::process::exit(1);
         }
 
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::schema::schema_data_file(file, direction, no_name, force_csv, separator, col_selection) {
+        let input = match InputConfig::from_cli(sub_matches, Some(file)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
                 eprintln!("错误: {}", e);
                 std::process::exit(1);
             }
-        } else {
-            if let Err(e) = commands::schema::schema_text_file(file) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
+        };
 
-    if let Some(sub_matches) = matches.subcommand_matches("summary") {
-        let file = sub_matches.get_one::<String>("FILE").unwrap();
-        let no_name = sub_matches.get_flag("no_name");
-        let force_csv = sub_matches.get_flag("csv");
-        let separator = extract_separator(sub_matches);
-        let col_selection = sub_matches.get_one::<String>("col").map(|s| s.as_str());
-
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::summary::summary_data_file(file, no_name, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            if let Err(e) = rt.block_on(commands::summary::summary_text_file(file)) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if let Some(sub_matches) = matches.subcommand_matches("chat") {
-        let file = sub_matches.get_one::<String>("FILE").unwrap();
-        let question = sub_matches.get_one::<String>("QUESTION").map(|s| s.as_str());
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        if let Err(e) = rt.block_on(commands::chat::chat_file(file, question)) {
+        if let Err(e) =
+            commands::schema::schema_command(&input, direction, no_name, col_selection)
+        {
             eprintln!("错误: {}", e);
             std::process::exit(1);
         }
         return;
     }
+
+    // ---- summary 子命令 ----
+    if let Some(sub_matches) = matches.subcommand_matches("summary") {
+        let file = sub_matches.get_one::<String>("FILE").unwrap();
+        let no_name = sub_matches.get_flag("no_name");
+        let col_selection = sub_matches.get_one::<String>("col").map(|s| s.as_str());
+
+        let input = match InputConfig::from_cli(sub_matches, Some(file)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) = commands::summary::summary_command(&input, no_name, col_selection) {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ---- chat 子命令 ----
+    if let Some(sub_matches) = matches.subcommand_matches("chat") {
+        let file = sub_matches.get_one::<String>("FILE").unwrap();
+        let question = sub_matches.get_one::<String>("QUESTION").map(|s| s.as_str());
+
+        let input = match InputConfig::from_cli(sub_matches, Some(file)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        if let Err(e) = rt.block_on(commands::chat::chat_command(&input, question)) {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ========================================================================
+    // 无子命令模式（默认模式 + 全局标志）
+    // ========================================================================
+
     let rows_val = matches.get_one::<String>("rows_flag");
     let txt_flag = matches.get_flag("txt_flag");
 
@@ -538,12 +572,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    let file = matches.get_one::<String>("file");
-    if file.is_none() {
-        eprintln!("错误: 请指定文件路径或子命令。使用 --help 查看帮助。");
-        std::process::exit(1);
-    }
-    let file = file.unwrap();
+    let file_arg = matches.get_one::<String>("file").map(|s| s.as_str());
 
     let summary_flag = matches.get_flag("summary_flag");
     let head_flag = matches.get_flag("head_flag");
@@ -551,26 +580,36 @@ fn main() {
     let schema_flag = matches.get_flag("schema_flag");
     let quest_val = matches.get_one::<String>("quest_flag");
 
-    let flags_set = [summary_flag, head_flag, tail_flag, schema_flag, quest_val.is_some(), rows_val.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+    let flags_set = [
+        summary_flag,
+        head_flag,
+        tail_flag,
+        schema_flag,
+        quest_val.is_some(),
+        rows_val.is_some(),
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
 
     if flags_set == 0 {
-        eprintln!("错误: 必须指定功能选项之一: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q <question>, --rows/-r <ROW>");
+        eprintln!(
+            "错误: 必须指定功能选项之一: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q <question>, --rows/-r <ROW>"
+        );
         std::process::exit(1);
     }
 
     if flags_set > 1 {
-        eprintln!("错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q, --rows/-r, --version 是互斥的");
+        eprintln!(
+            "错误: --summary/-s, --head/-h, --tail/-t, --schema/-e, --quest/-q, --rows/-r, --version 是互斥的"
+        );
         std::process::exit(1);
     }
 
     let no_name = matches.get_flag("no_name");
-    let force_csv = matches.get_flag("csv");
-    let separator = extract_separator(&matches);
     let col_selection = matches.get_one::<String>("col").map(|s| s.as_str());
 
+    // ---- --rows 模式 ----
     if let Some(row_spec) = rows_val {
         let selection = match commands::rows::parse_rows(row_spec) {
             Ok(sel) => sel,
@@ -589,118 +628,145 @@ fn main() {
         };
         let line_width = if txt_flag { 0 } else { mgr.line_width() };
 
-        if txt_flag || (!force_csv && commands::util::is_text_file(file)) {
-            if let Err(e) = commands::rows::rows_text_file(file, &selection, line_width, txt_flag) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            if let Err(e) = commands::rows::rows_data_file(file, &selection, no_name, line_width, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if summary_flag {
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::summary::summary_data_file(file, no_name, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            if let Err(e) = rt.block_on(commands::summary::summary_text_file(file)) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if head_flag {
-        let n: usize = matches.get_one::<String>("num").and_then(|s| s.parse().ok()).unwrap_or(5);
-
-        let mgr = match config::ConfigManager::new() {
-            Ok(m) => m,
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("错误: 无法读取配置: {}", e);
+                eprintln!("错误: {}", e);
                 std::process::exit(1);
             }
         };
-        let line_width = mgr.line_width();
 
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::head::head_data_file(file, n, no_name, line_width, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            if let Err(e) = commands::head::head_text_file(file, n, line_width) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if tail_flag {
-        let n: usize = matches.get_one::<String>("num").and_then(|s| s.parse().ok()).unwrap_or(5);
-
-        let mgr = match config::ConfigManager::new() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("错误: 无法读取配置: {}", e);
-                std::process::exit(1);
-            }
-        };
-        let line_width = mgr.line_width();
-
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::tail::tail_data_file(file, n, no_name, line_width, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            if let Err(e) = commands::tail::tail_text_file(file, n, line_width) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if schema_flag {
-        if force_csv || commands::util::is_data_file(file) {
-            if let Err(e) = commands::schema::schema_data_file(file, "col", no_name, force_csv, separator, col_selection) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        } else {
-            if let Err(e) = commands::schema::schema_text_file(file) {
-                eprintln!("错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
-    if let Some(question) = quest_val {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        if let Err(e) = rt.block_on(commands::chat::chat_file(file, Some(question))) {
+        if let Err(e) = commands::rows::rows_command(
+            &input,
+            &selection,
+            no_name,
+            line_width,
+            txt_flag,
+            col_selection,
+        ) {
             eprintln!("错误: {}", e);
             std::process::exit(1);
         }
         return;
     }
-}
 
-fn extract_separator(matches: &clap::ArgMatches) -> Option<u8> {
-    let sep_str = matches.get_one::<String>("separator")?;
-    if sep_str.is_empty() {
-        None
-    } else {
-        Some(sep_str.as_bytes()[0])
+    // ---- --summary 模式 ----
+    if summary_flag {
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) = commands::summary::summary_command(&input, no_name, col_selection) {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ---- --head 模式 ----
+    if head_flag {
+        let n: usize = matches
+            .get_one::<String>("num")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
+        let mgr = match config::ConfigManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("错误: 无法读取配置: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let line_width = mgr.line_width();
+
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) =
+            commands::head::head_command(&input, n, no_name, line_width, col_selection)
+        {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ---- --tail 模式 ----
+    if tail_flag {
+        let n: usize = matches
+            .get_one::<String>("num")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
+        let mgr = match config::ConfigManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("错误: 无法读取配置: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let line_width = mgr.line_width();
+
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) =
+            commands::tail::tail_command(&input, n, no_name, line_width, col_selection)
+        {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ---- --schema 模式 ----
+    if schema_flag {
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) =
+            commands::schema::schema_command(&input, "col", no_name, col_selection)
+        {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // ---- --quest 模式 ----
+    if let Some(question) = quest_val {
+        let input = match InputConfig::from_cli(&matches, file_arg) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("错误: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        if let Err(e) = rt.block_on(commands::chat::chat_command(&input, Some(question))) {
+            eprintln!("错误: {}", e);
+            std::process::exit(1);
+        }
+        return;
     }
 }

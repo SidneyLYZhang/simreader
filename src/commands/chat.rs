@@ -1,10 +1,14 @@
 use std::io::{self, Write};
-use std::path::Path;
 
-use crate::commands::summary::{create_llm_provider};
+use crate::commands::summary::create_llm_provider;
+use crate::commands::util::input_to_file_format;
 use crate::config::ConfigManager;
+use crate::input::{DataFormat, InputConfig};
 
-pub async fn chat_file(file_path: &str, question: Option<&str>) -> anyhow::Result<()> {
+pub async fn chat_command(
+    input: &InputConfig,
+    question: Option<&str>,
+) -> anyhow::Result<()> {
     let mgr = ConfigManager::new()?;
     let cfg = mgr.config();
 
@@ -28,7 +32,7 @@ pub async fn chat_file(file_path: &str, question: Option<&str>) -> anyhow::Resul
         }
     };
 
-    let file_content = load_file_content(file_path);
+    let file_content = load_file_content(input);
 
     if let Some(q) = question {
         let answer = ask_llm(&*provider, &mgr, &file_content, q).await?;
@@ -40,21 +44,45 @@ pub async fn chat_file(file_path: &str, question: Option<&str>) -> anyhow::Resul
     Ok(())
 }
 
-fn load_file_content(file_path: &str) -> String {
-    let path = Path::new(file_path);
-    let content = if util_is_data_file(file_path) {
-        match load_data_file_preview(file_path) {
+fn load_file_content(input: &InputConfig) -> String {
+    let content = match input.format() {
+        DataFormat::Text => match input.read_to_string() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("警告: 读取数据文件失败: {}", e);
-                String::new()
+                eprintln!("警告: 读取输入失败: {}", e);
+                return String::new();
+            }
+        },
+        DataFormat::Csv { .. } => {
+            if let Some(path) = input.file_path() {
+                match load_data_file_preview(path.to_str().unwrap(), input) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("警告: 读取数据文件失败: {}", e);
+                        String::new()
+                    }
+                }
+            } else {
+                match input.read_to_string() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("警告: 读取输入失败: {}", e);
+                        String::new()
+                    }
+                }
             }
         }
-    } else {
-        match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("警告: 读取文件失败: {}", e);
+        _ => {
+            if let Some(path) = input.file_path() {
+                match load_data_file_preview(path.to_str().unwrap(), input) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("警告: 读取数据文件失败: {}", e);
+                        String::new()
+                    }
+                }
+            } else {
+                eprintln!("警告: 该格式不支持从标准输入读取");
                 String::new()
             }
         }
@@ -63,16 +91,8 @@ fn load_file_content(file_path: &str) -> String {
     content.chars().take(50000).collect()
 }
 
-fn util_is_data_file(file_path: &str) -> bool {
-    crate::commands::util::is_data_file(file_path)
-}
-
-fn load_data_file_preview(file_path: &str) -> anyhow::Result<String> {
-    use crate::commands::util;
-
-    let format = util::detect_file_format(file_path)
-        .ok_or_else(|| anyhow::anyhow!("不支持的文件格式"))?;
-    let sep = util::csv_separator_for_file(file_path);
+fn load_data_file_preview(file_path: &str, input: &InputConfig) -> anyhow::Result<String> {
+    let (format, sep) = input_to_file_format(input);
 
     let lf = crate::reader::readdata::read_to_lazyframe(file_path, format, sep, None)?;
     let df = lf.limit(100).collect()?;
